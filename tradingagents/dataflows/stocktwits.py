@@ -53,15 +53,34 @@ def _within_window(messages, start_date, end_date):
     return kept
 
 
+# Indian exchange suffixes stripped for StockTwits cashtag lookup.
+# Kept explicit: a generic "strip after last dot" rule would break dotted
+# symbols that StockTwits *does* index (BRK.B, BF.B) or map to a different
+# instrument (SHEL.L → $SHEL, the US ADR).  Extend only after verifying the
+# bare symbol resolves to the intended listing on StockTwits.
+_BARE_CASHTAG_SUFFIXES = (".NS", ".BO", ".BSE", ".NSE")
+
+
 def _stocktwits_symbol(ticker: str) -> str:
-    """Map a crypto pair to StockTwits' ``<BASE>.X`` convention.
+    """Map a crypto pair to StockTwits' ``<BASE>.X`` convention or strip exchange suffixes.
 
     StockTwits lists crypto as ``BTC.X`` (Yahoo's ``BTC-USD`` form 404s), so any
-    crypto symbol resolves to its base plus ``.X``; other symbols pass through
-    upper-cased.
+    crypto symbol resolves to its base plus ``.X``. StockTwits also indexes
+    equities under bare ticker symbols without regional exchange suffixes
+    (e.g. ``RELIANCE`` rather than ``RELIANCE.NS`` or ``HDFCBANK.BO``).
+    Other symbols pass through upper-cased.
     """
     base = crypto_base(ticker)
-    return f"{base}.X" if base else ticker.strip().upper()
+    if base:
+        return f"{base}.X"
+    clean = ticker.strip().upper()
+    for suffix in _BARE_CASHTAG_SUFFIXES:
+        if clean.endswith(suffix):
+            bare = clean[: -len(suffix)]
+            if bare:  # guard: ".NS" alone must not become ""
+                return bare
+    return clean
+
 
 
 def fetch_stocktwits_messages(
