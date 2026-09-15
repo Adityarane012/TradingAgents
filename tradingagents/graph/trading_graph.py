@@ -31,7 +31,11 @@ from tradingagents.agents.utils.agent_utils import (
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import (
+    DEFAULT_CONFIG,
+    REGIONAL_NEWS_QUERIES,
+    SUFFIX_TO_REGION,
+)
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.reporting import write_report_tree
 
@@ -97,6 +101,8 @@ class TradingAgentsGraph:
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
+        # Track whether the caller explicitly supplied news queries.
+        self._user_set_news_queries = config is not None and "global_news_queries" in config
 
         # Update the interface's config
         set_config(self.config)
@@ -418,6 +424,16 @@ class TradingAgentsGraph:
         PortfolioRating enum.
         """
         self.ticker = company_name
+
+        # Auto-select region-appropriate macro news queries when the caller
+        # did not supply an explicit override (I-005).
+        if not self._user_set_news_queries:
+            region = SUFFIX_TO_REGION.get(
+                next((s for s in SUFFIX_TO_REGION if company_name.upper().endswith(s)), ""),
+                "US",
+            )
+            self.config["global_news_queries"] = REGIONAL_NEWS_QUERIES[region]
+            set_config(self.config)
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name)
