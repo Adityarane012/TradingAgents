@@ -80,6 +80,28 @@ def _coerce_max_tokens(value):
     return n
 
 
+def _select_regional_news_queries(company_name: str, current_queries) -> list[str] | None:
+    """Return region-appropriate ``global_news_queries`` for ``company_name``,
+    or ``None`` when ``current_queries`` has already been customized (I-005).
+
+    "Customized" is detected by value against ``DEFAULT_CONFIG``, not by key
+    presence: every real entry point (``main.py``, ``cli/main.py``) builds its
+    config as ``DEFAULT_CONFIG.copy()``, so ``"global_news_queries" in config``
+    is always true and a presence check never fires through either of them —
+    the auto-select would silently never activate outside a bespoke config
+    dict that omits the key entirely. A pure function (rather than inlined in
+    ``propagate()``) so this logic is unit-testable without constructing a
+    full ``TradingAgentsGraph``, which needs a live LLM provider.
+    """
+    if current_queries != DEFAULT_CONFIG["global_news_queries"]:
+        return None
+    region = SUFFIX_TO_REGION.get(
+        next((s for s in SUFFIX_TO_REGION if company_name.upper().endswith(s)), ""),
+        "US",
+    )
+    return REGIONAL_NEWS_QUERIES[region]
+
+
 class TradingAgentsGraph:
     """Main class that orchestrates the trading agents framework."""
 
@@ -101,8 +123,6 @@ class TradingAgentsGraph:
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
-        # Track whether the caller explicitly supplied news queries.
-        self._user_set_news_queries = config is not None and "global_news_queries" in config
 
         # Update the interface's config
         set_config(self.config)
@@ -426,13 +446,17 @@ class TradingAgentsGraph:
         self.ticker = company_name
 
         # Auto-select region-appropriate macro news queries when the caller
-        # did not supply an explicit override (I-005).
-        if not self._user_set_news_queries:
-            region = SUFFIX_TO_REGION.get(
-                next((s for s in SUFFIX_TO_REGION if company_name.upper().endswith(s)), ""),
-                "US",
-            )
-            self.config["global_news_queries"] = REGIONAL_NEWS_QUERIES[region]
+        # did not customize them (I-005). Rebinds self.config to a new dict
+        # rather than mutating it in place — self.config can be the literal
+        # DEFAULT_CONFIG object (when the caller passes config=None), and
+        # mutating that shared module-level dict would leak the first Indian
+        # ticker's news queries into every later run's "default," including
+        # US ones.
+        regional_queries = _select_regional_news_queries(
+            company_name, self.config.get("global_news_queries")
+        )
+        if regional_queries is not None:
+            self.config = {**self.config, "global_news_queries": regional_queries}
             set_config(self.config)
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.

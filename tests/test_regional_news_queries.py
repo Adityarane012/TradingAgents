@@ -5,11 +5,20 @@ Verifies that TradingAgentsGraph.propagate() injects region-appropriate
 explicit user override is never overwritten.
 """
 
+import pytest
+
 from tradingagents.default_config import (
     DEFAULT_CONFIG,
     REGIONAL_NEWS_QUERIES,
     SUFFIX_TO_REGION,
 )
+from tradingagents.graph.trading_graph import _select_regional_news_queries
+
+# Fast, isolated, no I/O — matches every other file in this suite's use of
+# the "unit" marker (pyproject.toml runs `-m unit` as the default fast pass).
+# This module previously had no marker at all, so it was silently excluded
+# from that pass.
+pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
@@ -97,3 +106,64 @@ def test_resolve_region_aapl_us():
 
 def test_resolve_region_msft_us():
     assert _resolve_region("MSFT") == "US"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for _select_regional_news_queries (the actual function
+# TradingAgentsGraph.propagate() calls, not a local reimplementation).
+#
+# The original wiring gated auto-select on `"global_news_queries" in config`,
+# which is always True through every real entry point: main.py and
+# cli/main.py both build their config as `DEFAULT_CONFIG.copy()`, so the key
+# is always present and the presence check never fires in practice. These
+# tests reproduce that exact construction pattern rather than a bespoke dict
+# that happens to omit the key, which is what let the bug ship.
+# ---------------------------------------------------------------------------
+
+def test_fires_for_india_ticker_with_default_config_copy():
+    """Reproduces main.py's `config = DEFAULT_CONFIG.copy()` construction."""
+    config = DEFAULT_CONFIG.copy()
+    result = _select_regional_news_queries("RELIANCE.NS", config["global_news_queries"])
+    assert result == REGIONAL_NEWS_QUERIES["IN"]
+
+
+def test_fires_for_japan_ticker_with_default_config_copy():
+    config = DEFAULT_CONFIG.copy()
+    result = _select_regional_news_queries("7203.T", config["global_news_queries"])
+    assert result == REGIONAL_NEWS_QUERIES["JP"]
+
+
+def test_no_op_for_us_ticker_with_default_config_copy():
+    """US queries already match the default, so selecting them is a no-op —
+    but the function must still return the (identical) US list, not None,
+    since it cannot distinguish "unmodified" from "explicitly set to the
+    same content" and either reading is correct for a US ticker."""
+    config = DEFAULT_CONFIG.copy()
+    result = _select_regional_news_queries("AAPL", config["global_news_queries"])
+    assert result == REGIONAL_NEWS_QUERIES["US"]
+
+
+def test_respects_explicit_user_override_even_for_india_ticker():
+    """A caller who actually customized global_news_queries must never be
+    overridden, regardless of the ticker's region."""
+    custom = ["my custom query"]
+    result = _select_regional_news_queries("RELIANCE.NS", custom)
+    assert result is None
+
+
+def test_none_current_queries_treated_as_customized():
+    # A config that never had the key (bespoke dict, not DEFAULT_CONFIG.copy())
+    # must not crash and must not silently inject regional queries either —
+    # None is not equal to the default list, so it's treated as "leave alone."
+    result = _select_regional_news_queries("RELIANCE.NS", None)
+    assert result is None
+
+
+def test_does_not_mutate_default_config():
+    """Calling the selector must never mutate DEFAULT_CONFIG's list itself —
+    regression guard for the original bug where self.config could literally
+    be the DEFAULT_CONFIG object and get mutated in place, leaking one
+    ticker's regional queries into every later run's "default"."""
+    original = list(DEFAULT_CONFIG["global_news_queries"])
+    _select_regional_news_queries("RELIANCE.NS", DEFAULT_CONFIG["global_news_queries"])
+    assert DEFAULT_CONFIG["global_news_queries"] == original
