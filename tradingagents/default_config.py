@@ -53,6 +53,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
+    "TRADINGAGENTS_REDDIT_ENABLED":       "reddit_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
@@ -159,6 +160,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "news_article_limit": 20,             # max articles per ticker (ticker-news)
     "global_news_article_limit": 10,      # max articles for global/macro news
     "global_news_lookback_days": 7,       # macro news lookback window
+    # Reddit is fetched anonymously by default and shares a strict per-IP rate
+    # limit with every other analysis on the same network — fine for one
+    # ticker, but a multi-ticker batch run can spend more wall time in 429
+    # backoffs than in actual analysis. Set REDDIT_CLIENT_ID/SECRET (see
+    # dataflows/reddit.py) to switch to Reddit's OAuth API and sidestep that
+    # limit entirely, or set this False to skip Reddit and fall back to
+    # News + StockTwits only.
+    "reddit_enabled": True,
     # Search queries used by get_global_news for macro headlines. Extend or
     # replace to broaden geographic / sector coverage.
     "global_news_queries": [

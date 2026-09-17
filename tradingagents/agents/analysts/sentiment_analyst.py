@@ -40,6 +40,7 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.reddit import DEFAULT_SUBREDDITS, INDIA_SUBREDDITS, fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
 from tradingagents.dataflows.symbol_utils import is_india_ticker
@@ -74,7 +75,17 @@ def create_sentiment_analyst(llm):
         stocktwits_block = fetch_stocktwits_messages(
             ticker, limit=30, start_date=start_date, end_date=end_date
         )
-        reddit_block = fetch_reddit_posts(ticker, start_date=start_date, end_date=end_date)
+        # reddit_enabled=False skips the network call entirely rather than
+        # attempting and discarding it — Reddit's anonymous RSS path shares a
+        # strict per-IP rate limit across every analysis on the network, and
+        # a multi-ticker batch run can spend more wall time in 429 backoffs
+        # than in actual analysis. Distinct from "<unavailable>" (a failed
+        # fetch) and "<no posts found>" (a real empty result): this is a
+        # deliberate opt-out, and the wording says so.
+        if get_config().get("reddit_enabled", True):
+            reddit_block = fetch_reddit_posts(ticker, start_date=start_date, end_date=end_date)
+        else:
+            reddit_block = "<Reddit disabled via config (reddit_enabled=False) — not fetched>"
 
         system_message = _build_system_message(
             ticker=ticker,

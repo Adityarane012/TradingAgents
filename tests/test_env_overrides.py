@@ -26,6 +26,7 @@ def test_no_env_uses_built_in_defaults(monkeypatch):
     assert dc.DEFAULT_CONFIG["backend_url"] is None
     assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 1
     assert dc.DEFAULT_CONFIG["checkpoint_enabled"] is False
+    assert dc.DEFAULT_CONFIG["reddit_enabled"] is True
 
 
 def test_string_overrides(monkeypatch):
@@ -66,6 +67,11 @@ def test_int_coercion(monkeypatch):
 def test_bool_coercion(monkeypatch, raw, expected):
     dc = _reload_with_env(monkeypatch, TRADINGAGENTS_CHECKPOINT_ENABLED=raw)
     assert dc.DEFAULT_CONFIG["checkpoint_enabled"] is expected
+
+
+def test_reddit_enabled_env_override(monkeypatch):
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_REDDIT_ENABLED="false")
+    assert dc.DEFAULT_CONFIG["reddit_enabled"] is False
 
 
 def test_reasoning_thinking_overrides(monkeypatch):

@@ -159,3 +159,41 @@ class TestSentimentAnalystIndiaPrompt:
         assert "r/wallstreetbets" in text
         assert "r/IndianStreetBets" not in text
         assert "coverage gap" not in text
+
+
+@pytest.mark.unit
+class TestSentimentAnalystRedditToggle:
+    """reddit_enabled=False skips the Reddit fetch entirely — for users
+    without REDDIT_CLIENT_ID/SECRET who don't want a multi-ticker batch run
+    burning wall time on 429 backoffs against the anonymous RSS path."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_non_reddit_sources(self, monkeypatch):
+        from tradingagents.agents.analysts import sentiment_analyst as sentiment
+
+        monkeypatch.setattr(sentiment, "fetch_stocktwits_messages", lambda *a, **k: "st")
+        monkeypatch.setattr(sentiment.get_news, "func", lambda *a, **k: "news", raising=False)
+
+    def test_disabled_skips_the_fetch_and_says_so(self, monkeypatch):
+        from tradingagents.dataflows.config import set_config
+
+        set_config({"reddit_enabled": False})
+        from tradingagents.agents.analysts import sentiment_analyst as sentiment
+
+        monkeypatch.setattr(
+            sentiment, "fetch_reddit_posts",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not fetch Reddit")),
+        )
+        captured = {}
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(_state("RELIANCE.NS"))
+        text = "\n".join(str(m) for m in captured["prompt"])
+        assert "Reddit disabled via config" in text
+
+    def test_enabled_by_default_still_fetches(self, monkeypatch):
+        from tradingagents.agents.analysts import sentiment_analyst as sentiment
+
+        monkeypatch.setattr(sentiment, "fetch_reddit_posts", lambda *a, **k: "rd")
+        captured = {}
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(_state("AAPL"))
+        text = "\n".join(str(m) for m in captured["prompt"])
+        assert "Reddit disabled via config" not in text
