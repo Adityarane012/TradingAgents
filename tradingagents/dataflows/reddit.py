@@ -36,7 +36,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .date_window import in_window
-from .symbol_utils import crypto_base
+from .symbol_utils import crypto_base, is_india_ticker, strip_india_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,26 @@ _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 # discussion. wallstreetbets has the most volume but most noise; stocks /
 # investing trend more measured. Caller can override.
 DEFAULT_SUBREDDITS = ("wallstreetbets", "stocks", "investing")
+
+# Indian retail/investing subreddits, used automatically for .NS/.BO/.NSE/.BSE
+# tickers when the caller does not pass an explicit `subreddits` override.
+# wallstreetbets/stocks/investing return essentially nothing for NSE/BSE
+# names (they're US-market communities), so the sentiment analyst otherwise
+# always sees an empty Reddit block and defaults to Neutral/low-confidence
+# regardless of actual retail sentiment.
+#
+# Verified live against Reddit's RSS feed on 2026-09-17 (each subreddit's own
+# feed, not a search — confirms the community exists and is active, not just
+# that the name resolves):
+#   r/IndianStreetBets — active, newest post from today.
+#   r/IndiaInvestments  — active, newest post 3 days old.
+# r/DalalStreet was tried and dropped: the subreddit exists but its RSS
+# feed's newest post was from January 2024 — effectively dead, so including
+# it would just add a guaranteed "<no posts found>" block to every report
+# rather than real signal. r/stocks is kept third for ADR-related discussion
+# (Infosys/INFY, Wipro/WIT, ICICI Bank/IBN, etc. trade on US exchanges and
+# get discussed there).
+INDIA_SUBREDDITS = ("IndianStreetBets", "IndiaInvestments", "stocks")
 
 
 def _search_qs(ticker: str, limit: int) -> str:
@@ -263,7 +283,7 @@ def _fetch_subreddit(
 
 def fetch_reddit_posts(
     ticker: str,
-    subreddits: Iterable[str] = DEFAULT_SUBREDDITS,
+    subreddits: Iterable[str] | None = None,
     limit_per_sub: int = 5,
     timeout: float = 10.0,
     inter_request_delay: float = 1.0,
@@ -273,6 +293,10 @@ def fetch_reddit_posts(
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
 
+    ``subreddits=None`` (the default) auto-selects: ``INDIA_SUBREDDITS`` for
+    an NSE/BSE-suffixed ticker, ``DEFAULT_SUBREDDITS`` otherwise. Pass an
+    explicit iterable to override for either case.
+
     ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
     stay under Reddit's public per-IP rate limit; combined with the RSS-first
     path it makes 429s rare even when several analyses run back-to-back.
@@ -281,9 +305,14 @@ def fetch_reddit_posts(
     that window so a historical run does not leak current discussion into a
     backtest (#1220).
     """
+    india = is_india_ticker(ticker)
+    if subreddits is None:
+        subreddits = INDIA_SUBREDDITS if india else DEFAULT_SUBREDDITS
     # Crypto reaches us as a Yahoo pair (BTC-USD); search Reddit for the base
     # ("BTC") so the query actually matches discussion instead of near-nothing.
-    ticker = crypto_base(ticker) or ticker
+    # Indian tickers reach us with an exchange suffix (RELIANCE.NS) that
+    # retail posts never spell out — search for the bare NSE/BSE root instead.
+    ticker = crypto_base(ticker) or (strip_india_suffix(ticker) if india else ticker)
     subreddits = list(subreddits)
     blocks = []
     total_posts = 0

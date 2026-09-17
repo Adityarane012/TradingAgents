@@ -53,22 +53,48 @@ def _within_window(messages, start_date, end_date):
     return kept
 
 
-# Indian exchange suffixes stripped for StockTwits cashtag lookup.
-# Kept explicit: a generic "strip after last dot" rule would break dotted
-# symbols that StockTwits *does* index (BRK.B, BF.B) or map to a different
-# instrument (SHEL.L → $SHEL, the US ADR).  Extend only after verifying the
-# bare symbol resolves to the intended listing on StockTwits.
+# Indian exchange suffixes that mark a ticker as needing ADR remapping (see
+# _INDIA_ADR_ALIASES below) rather than a bare-symbol guess.
 _BARE_CASHTAG_SUFFIXES = (".NS", ".BO", ".BSE", ".NSE")
 
+# Verified NSE/BSE root -> StockTwits symbol mapping, checked live against
+# api.stocktwits.com on 2026-09-17. Blind "strip the suffix and hope" is NOT
+# safe for Indian equities: most NSE roots simply 404 (RELIANCE, HDFCBANK,
+# SBIN, WIPRO, MARUTI, SUNPHARMA, AXISBANK, TITAN, ONGC, NTPC all confirmed),
+# and several *silently collide* with an unrelated US ticker of the same
+# letters and return a confidently-wrong company's sentiment instead of no
+# data at all:
+#   TCS.NS -> bare "TCS" is Container Store Group Inc (OTC), not Tata
+#             Consultancy Services.
+#   ITC.NS -> bare "ITC" is ITC Holdings Corp (NYSE), a US utility, not
+#             ITC Limited.
+# Only the roots below have a confirmed-correct StockTwits listing, via the
+# company's own US-listed ADR (or, for INFY/VEDL, a coincidental ticker
+# match with the NSE root). Anything else returns no mapping so the caller
+# skips the request rather than gamble on a wrong-company result — same
+# principle as the SHEL.L / BRK.B guards a few lines up in the test suite.
+_INDIA_ADR_ALIASES = {
+    "INFY": "INFY",  # Infosys — ADR ticker coincides with the NSE root
+    "WIPRO": "WIT",  # Wipro ADR
+    "ICICIBANK": "IBN",  # ICICI Bank ADR
+    "HDFCBANK": "HDB",  # HDFC Bank ADR
+    "DRREDDY": "RDY",  # Dr. Reddy's Laboratories ADR
+    "VEDL": "VEDL",  # Vedanta — ADR ticker coincides with the NSE root
+    "TATAMOTORS": "TTM",  # Tata Motors ADR; NYSE-delisted 2023, stream likely
+    # stale/inactive but still resolves to the correct company, not a
+    # different one — safe to keep, weight confidence accordingly.
+}
 
-def _stocktwits_symbol(ticker: str) -> str:
-    """Map a crypto pair to StockTwits' ``<BASE>.X`` convention or strip exchange suffixes.
+
+def _stocktwits_symbol(ticker: str) -> str | None:
+    """Map to a StockTwits cashtag, or ``None`` when there's no safe mapping.
 
     StockTwits lists crypto as ``BTC.X`` (Yahoo's ``BTC-USD`` form 404s), so any
-    crypto symbol resolves to its base plus ``.X``. StockTwits also indexes
-    equities under bare ticker symbols without regional exchange suffixes
-    (e.g. ``RELIANCE`` rather than ``RELIANCE.NS`` or ``HDFCBANK.BO``).
-    Other symbols pass through upper-cased.
+    crypto symbol resolves to its base plus ``.X``. For Indian exchange-suffixed
+    tickers (``.NS``/``.BO``/``.NSE``/``.BSE``), only the verified entries in
+    ``_INDIA_ADR_ALIASES`` are resolved; every other Indian root returns
+    ``None`` rather than a bare-symbol guess (see the module comment above for
+    why that guess is unsafe). Other symbols pass through upper-cased.
     """
     base = crypto_base(ticker)
     if base:
@@ -76,9 +102,8 @@ def _stocktwits_symbol(ticker: str) -> str:
     clean = ticker.strip().upper()
     for suffix in _BARE_CASHTAG_SUFFIXES:
         if clean.endswith(suffix):
-            bare = clean[: -len(suffix)]
-            if bare:  # guard: ".NS" alone must not become ""
-                return bare
+            root = clean[: -len(suffix)]
+            return _INDIA_ADR_ALIASES.get(root)
     return clean
 
 
@@ -99,10 +124,17 @@ def fetch_stocktwits_messages(
     is returned rather than leaking today's chatter into a backtest (#1220).
 
     Returns a placeholder string when the endpoint is unreachable, the
-    symbol has no messages, or the response shape is unexpected — the
-    caller never has to special-case None or exceptions.
+    symbol has no messages, the response shape is unexpected, or (for
+    Indian exchange-suffixed tickers) there is no verified StockTwits
+    mapping — the caller never has to special-case None or exceptions.
     """
-    url = _API.format(ticker=_stocktwits_symbol(ticker))
+    symbol = _stocktwits_symbol(ticker)
+    if symbol is None:
+        return (
+            f"<no StockTwits mapping for ${ticker.upper()}: only Indian "
+            "tickers with a verified US-listed ADR have StockTwits coverage>"
+        )
+    url = _API.format(ticker=symbol)
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
         with urlopen(req, timeout=timeout) as resp:

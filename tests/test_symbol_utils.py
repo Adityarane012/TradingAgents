@@ -7,8 +7,10 @@ import pytest
 from tradingagents.dataflows.symbol_utils import (
     NoMarketDataError,
     crypto_base,
+    is_india_ticker,
     is_yahoo_safe,
     normalize_symbol,
+    strip_india_suffix,
 )
 
 
@@ -96,6 +98,34 @@ class TestCryptoBase(unittest.TestCase):
         # crypto_base is the shared primitive behind the -USD normalization.
         self.assertEqual(normalize_symbol("BTCUSD"), "BTC-USD")
         self.assertEqual(crypto_base("BTCUSD"), "BTC")
+
+
+@pytest.mark.unit
+class TestIndiaSuffixHelpers(unittest.TestCase):
+    def test_is_india_ticker_true_for_nse_bse_suffixes(self):
+        for sym in ("RELIANCE.NS", "hdfcbank.bo", "TCS.NSE", "infy.bse"):
+            self.assertTrue(is_india_ticker(sym))
+
+    def test_is_india_ticker_false_for_others(self):
+        for sym in ("AAPL", "BRK.B", "SHEL.L", "7203.T", "", None, 123):
+            self.assertFalse(is_india_ticker(sym))
+
+    def test_strip_india_suffix_removes_known_suffixes(self):
+        self.assertEqual(strip_india_suffix("RELIANCE.NS"), "RELIANCE")
+        self.assertEqual(strip_india_suffix("HDFCBANK.BO"), "HDFCBANK")
+        self.assertEqual(strip_india_suffix("TCS.NSE"), "TCS")
+        self.assertEqual(strip_india_suffix("INFY.BSE"), "INFY")
+
+    def test_strip_india_suffix_preserves_case_of_root(self):
+        self.assertEqual(strip_india_suffix("reliance.ns"), "reliance")
+
+    def test_strip_india_suffix_unchanged_for_non_india(self):
+        for sym in ("AAPL", "BRK.B", "SHEL.L", "7203.T"):
+            self.assertEqual(strip_india_suffix(sym), sym)
+
+    def test_strip_india_suffix_guards_bare_suffix(self):
+        # A ticker that IS just the suffix must not become "".
+        self.assertEqual(strip_india_suffix(".NS"), ".NS")
 
 
 if __name__ == "__main__":

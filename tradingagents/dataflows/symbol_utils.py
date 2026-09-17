@@ -141,3 +141,33 @@ def normalize_symbol(raw: str) -> str:
 def is_yahoo_safe(symbol: str) -> bool:
     """True when ``symbol`` only contains characters Yahoo symbols use."""
     return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
+
+
+# NSE/BSE exchange suffixes Yahoo/yfinance uses for Indian equities. Shared
+# by every dataflow and analyst that needs to detect "is this an Indian
+# ticker" or recover the bare NSE/BSE root (news search terms, Reddit search
+# terms, StockTwits ADR lookup, prompt regional context) so the suffix list
+# lives in exactly one place.
+INDIA_EXCHANGE_SUFFIXES = (".NS", ".BO", ".NSE", ".BSE")
+
+
+def is_india_ticker(ticker: str) -> bool:
+    """True when ``ticker`` carries an NSE/BSE exchange suffix."""
+    return isinstance(ticker, str) and ticker.strip().upper().endswith(INDIA_EXCHANGE_SUFFIXES)
+
+
+def strip_india_suffix(ticker: str) -> str:
+    """Return the bare NSE/BSE root (``RELIANCE`` for ``RELIANCE.NS``).
+
+    Case of the root is preserved; only the suffix match is case-insensitive.
+    Non-Indian tickers, and the degenerate case where the ticker IS just the
+    suffix (e.g. ``.NS``), are returned unchanged.
+    """
+    if not isinstance(ticker, str):
+        return ticker
+    stripped = ticker.strip()
+    upper = stripped.upper()
+    for suffix in INDIA_EXCHANGE_SUFFIXES:
+        if upper.endswith(suffix) and len(upper) > len(suffix):
+            return stripped[: -len(suffix)]
+    return stripped

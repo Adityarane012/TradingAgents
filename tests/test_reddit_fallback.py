@@ -302,3 +302,67 @@ class TestFailedFetchIsNotSilence:
                 "NVDA", subreddits=("a", "b", "c"), inter_request_delay=0
             )
         assert seen == [True, False, False]
+
+
+@pytest.mark.unit
+class TestIndiaRegionalRouting:
+    """.NS/.BO tickers auto-route to Indian subreddits with the suffix
+    stripped from the search term (#1346) — wallstreetbets/stocks/investing
+    return nothing for NSE/BSE names, and nobody searches "RELIANCE.NS"."""
+
+    def test_india_ticker_uses_india_subreddits_by_default(self):
+        seen_subs = []
+
+        def record(t, sub, limit, timeout, _retry=True):
+            seen_subs.append(sub)
+            return []
+
+        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
+            reddit.fetch_reddit_posts("RELIANCE.NS", inter_request_delay=0)
+        assert tuple(seen_subs) == reddit.INDIA_SUBREDDITS
+
+    def test_us_ticker_still_uses_default_subreddits(self):
+        seen_subs = []
+
+        def record(t, sub, limit, timeout, _retry=True):
+            seen_subs.append(sub)
+            return []
+
+        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
+            reddit.fetch_reddit_posts("AAPL", inter_request_delay=0)
+        assert tuple(seen_subs) == reddit.DEFAULT_SUBREDDITS
+
+    def test_explicit_subreddits_override_india_auto_selection(self):
+        seen_subs = []
+
+        def record(t, sub, limit, timeout, _retry=True):
+            seen_subs.append(sub)
+            return []
+
+        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
+            reddit.fetch_reddit_posts(
+                "RELIANCE.NS", subreddits=("stocks",), inter_request_delay=0
+            )
+        assert seen_subs == ["stocks"]
+
+    def test_india_suffix_stripped_from_search_term(self):
+        seen_tickers = []
+
+        def record(t, sub, limit, timeout, _retry=True):
+            seen_tickers.append(t)
+            return []
+
+        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
+            reddit.fetch_reddit_posts("HDFCBANK.BO", inter_request_delay=0)
+        assert seen_tickers == ["HDFCBANK"] * len(reddit.INDIA_SUBREDDITS)
+
+    def test_non_india_ticker_search_term_unchanged(self):
+        seen_tickers = []
+
+        def record(t, sub, limit, timeout, _retry=True):
+            seen_tickers.append(t)
+            return []
+
+        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
+            reddit.fetch_reddit_posts("AAPL", inter_request_delay=0)
+        assert seen_tickers == ["AAPL"] * len(reddit.DEFAULT_SUBREDDITS)
