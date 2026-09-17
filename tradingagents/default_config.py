@@ -177,7 +177,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
         "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
         "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
-        "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "news_data": "yfinance",             # Options: alpha_vantage, yfinance. get_global_news
+                                              # (macro/market news) also accepts "india_rss" (ET +
+                                              # Mint RSS feeds) — not a default, opt in for Indian
+                                              # tickers e.g. "india_rss,yfinance"
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
     },
