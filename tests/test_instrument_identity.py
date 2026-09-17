@@ -37,6 +37,17 @@ class ResolveInstrumentIdentityTests(unittest.TestCase):
         self.assertEqual(identity["industry"], "Building Products & Equipment")
         self.assertEqual(identity["exchange"], "PNK")
 
+    def test_resolves_currency_fields(self):
+        with patch("tradingagents.agents.utils.agent_utils.yf.Ticker") as mock:
+            mock.return_value.info = {
+                "longName": "Reliance Industries Limited",
+                "currency": "INR",
+                "financialCurrency": "INR",
+            }
+            identity = resolve_instrument_identity("RELIANCE.NS")
+        self.assertEqual(identity["currency"], "INR")
+        self.assertEqual(identity["financial_currency"], "INR")
+
     def test_falls_back_to_short_name(self):
         with patch("tradingagents.agents.utils.agent_utils.yf.Ticker") as mock:
             mock.return_value.info = {"shortName": "TOTO", "sector": "Industrials"}
@@ -94,6 +105,38 @@ class BuildInstrumentContextTests(unittest.TestCase):
         )
         self.assertIn("Name: Bitcoin USD", context)
         self.assertIn("crypto asset rather than a company", context)
+
+    def test_non_usd_currency_gets_explicit_face_value_warning(self):
+        context = build_instrument_context(
+            "RELIANCE.NS", "stock",
+            {"company_name": "Reliance Industries Limited", "currency": "INR", "financial_currency": "INR"},
+        )
+        self.assertIn("Currency: INR", context)
+        self.assertIn("reported in INR, not USD", context)
+
+    def test_usd_currency_gets_no_extra_warning(self):
+        context = build_instrument_context(
+            "AAPL", "stock",
+            {"company_name": "Apple Inc.", "currency": "USD", "financial_currency": "USD"},
+        )
+        self.assertIn("Currency: USD", context)
+        self.assertNotIn("not USD", context)
+
+    def test_mismatched_quote_and_financial_currency_both_shown(self):
+        context = build_instrument_context(
+            "INFY", "stock",
+            {"company_name": "Infosys Limited", "currency": "USD", "financial_currency": "INR"},
+        )
+        self.assertIn("Quote currency: USD; financial-statement currency: INR", context)
+        # The financial-statement currency drives the face-value warning since
+        # it governs how the fundamentals numbers in the report should be read.
+        self.assertIn("reported in INR, not USD", context)
+
+    def test_no_currency_data_omits_currency_details(self):
+        context = build_instrument_context(
+            "TOTDY", "stock", {"company_name": "TOTO LTD."}
+        )
+        self.assertNotIn("Currency", context)
 
 
 @pytest.mark.unit

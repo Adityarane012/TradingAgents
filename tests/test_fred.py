@@ -61,6 +61,14 @@ class FredResolutionTests(unittest.TestCase):
         self.assertEqual(fred._resolve_series_id("dgs30"), "DGS30")
         self.assertEqual(fred._resolve_series_id("MyCustomSeries"), "MYCUSTOMSERIES")
 
+    def test_india_alias_maps_to_series_id(self):
+        self.assertEqual(fred._resolve_series_id("india_cpi"), "INDCPIALLMINMEI")
+        self.assertEqual(fred._resolve_series_id("india_inflation"), "INDCPIALLMINMEI")
+        self.assertEqual(fred._resolve_series_id("india_discount_rate"), "INTDSRINM193N")
+        self.assertEqual(fred._resolve_series_id("india_10y_yield"), "INDIRLTLT01STM")
+        self.assertEqual(fred._resolve_series_id("usdinr"), "DEXINUS")
+        self.assertEqual(fred._resolve_series_id("india_gdp_per_capita"), "INDGDPRPCPPPT")
+
     def test_descriptive_phrase_is_rejected(self):
         # An LLM phrase (spaces / too long) is not a series ID — reject up front
         # with guidance rather than 400ing the API.

@@ -126,6 +126,15 @@ def resolve_instrument_identity(ticker: str) -> dict:
         ("industry", "industry"),
         ("exchange", "exchange"),
         ("quoteType", "quote_type"),
+        # Currency the instrument trades in / reports financials in. Without
+        # this, a non-USD instrument's raw numbers (INR crores for an NSE
+        # stock, JPY for a Tokyo listing, ...) look USD-shaped to the model
+        # and get analyzed as if they were — e.g. an NSE company's revenue
+        # read as ~83-86x its real USD value (#1350). Usually identical;
+        # kept separate because a few ADRs quote in USD while reporting
+        # financials in the home currency.
+        ("currency", "currency"),
+        ("financialCurrency", "financial_currency"),
     ):
         value = _clean_identity_value(info.get(source_key))
         if value:
@@ -167,6 +176,13 @@ def build_instrument_context(
             details.append(f"Industry: {industry}")
         if identity.get("exchange"):
             details.append(f"Exchange: {identity['exchange']}")
+        currency, financial_currency = identity.get("currency"), identity.get("financial_currency")
+        if currency and financial_currency and currency != financial_currency:
+            details.append(
+                f"Quote currency: {currency}; financial-statement currency: {financial_currency}"
+            )
+        elif currency or financial_currency:
+            details.append(f"Currency: {currency or financial_currency}")
 
     if details:
         context += (
@@ -180,6 +196,17 @@ def build_instrument_context(
             " Treat it as a crypto asset rather than a company, and do not "
             "assume company fundamentals are available."
         )
+    elif identity:
+        non_usd = next(
+            (c for c in (identity.get("financial_currency"), identity.get("currency")) if c),
+            None,
+        )
+        if non_usd and non_usd != "USD":
+            context += (
+                f" Prices and financial figures for this instrument are reported in "
+                f"{non_usd}, not USD — read them at face value in {non_usd} and do not "
+                "restate or benchmark them as if they were USD."
+            )
     return context
 
 

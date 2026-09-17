@@ -76,6 +76,25 @@ MACRO_SERIES = {
     "consumer_sentiment": "UMCSENT",
     "housing_starts": "HOUST",
     "retail_sales": "RSAFS",
+    # India macro, sourced through FRED from IMF/OECD upstream data. These
+    # series update far less often than the domestic US ones above — some
+    # IMF/OECD India series have gone months between updates or stopped
+    # being refreshed for a period — and could not be checked live against
+    # the FRED API while writing this (no FRED_API_KEY configured in this
+    # environment, and fred.stlouisfed.org was unreachable from it). A raw
+    # FRED series ID always works regardless of this alias table (see
+    # _resolve_series_id below), so treat these as a convenience, not a
+    # guarantee of freshness — read the as-of date FRED returns with the
+    # value rather than assuming it's current, and say so in the report if
+    # it's stale.
+    "india_cpi": "INDCPIALLMINMEI",  # India CPI, All Items (OECD MEI)
+    "india_inflation": "INDCPIALLMINMEI",  # alias for india_cpi
+    "india_discount_rate": "INTDSRINM193N",  # India discount rate (IMF IFS) —
+    # a policy-adjacent rate, NOT the RBI repo rate specifically; FRED has no
+    # dedicated repo-rate series for India as of this writing.
+    "india_10y_yield": "INDIRLTLT01STM",  # India 10Y govt bond yield (OECD MEI)
+    "usdinr": "DEXINUS",  # USD/INR exchange rate, daily (Fed H.10)
+    "india_gdp_per_capita": "INDGDPRPCPPPT",  # India GDP/capita, PPP (IMF WEO, annual)
 }
 
 

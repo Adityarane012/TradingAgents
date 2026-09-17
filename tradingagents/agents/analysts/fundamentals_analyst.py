@@ -8,12 +8,32 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
+from tradingagents.dataflows.symbol_utils import is_india_ticker
+
+# yfinance's fundamentals/balance-sheet/cashflow tools have no field for
+# promoter shareholding, promoter pledging, or FII/DII ownership — all
+# material governance signals for Indian equities but simply absent from the
+# data this analyst can call. Telling the model to "always analyze" them
+# (as opposed to noting they're unavailable) would just invite it to
+# fabricate numbers under prompt pressure, the same failure mode the
+# sentiment analyst was redesigned to avoid (see sentiment_analyst.py).
+_INDIA_FUNDAMENTALS_NOTE = (
+    "\n\nThis is an Indian (NSE/BSE) equity. Two notes: (1) the available "
+    "tools have no field for promoter shareholding %, promoter share "
+    "pledging, or FII/DII ownership changes — material governance signals "
+    "for Indian companies that you cannot verify here. If they're relevant, "
+    "say plainly that this data was not available rather than estimating or "
+    "inventing a figure. (2) Benchmark valuation multiples (P/E, P/B, "
+    "EV/EBITDA) against Nifty 50 / domestic sector peers, not S&P 500 norms — "
+    "Indian equities historically trade at different multiples than US peers."
+)
 
 
 def create_fundamentals_analyst(llm):
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         instrument_context = get_instrument_context_from_state(state)
+        ticker = state.get("company_of_interest", "")
 
         tools = [
             get_fundamentals,
@@ -26,7 +46,8 @@ def create_fundamentals_analyst(llm):
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Make sure to include as much detail as possible. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
             + " Use the available tools: `get_fundamentals` for comprehensive company analysis, `get_balance_sheet`, `get_cashflow`, and `get_income_statement` for specific financial statements."
-            + get_language_instruction(),
+            + (_INDIA_FUNDAMENTALS_NOTE if is_india_ticker(ticker) else "")
+            + get_language_instruction()
         )
 
         prompt = ChatPromptTemplate.from_messages(

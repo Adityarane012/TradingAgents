@@ -40,8 +40,9 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
-from tradingagents.dataflows.reddit import fetch_reddit_posts
+from tradingagents.dataflows.reddit import DEFAULT_SUBREDDITS, INDIA_SUBREDDITS, fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
+from tradingagents.dataflows.symbol_utils import is_india_ticker
 
 
 def _seven_days_back(trade_date: str) -> str:
@@ -82,6 +83,7 @@ def create_sentiment_analyst(llm):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            india=is_india_ticker(ticker),
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -135,8 +137,33 @@ def _build_system_message(
     news_block: str,
     stocktwits_block: str,
     reddit_block: str,
+    india: bool = False,
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
+    if india:
+        reddit_subs = ", ".join(f"r/{s}" for s in INDIA_SUBREDDITS)
+        reddit_character = (
+            "r/IndianStreetBets is the high-energy, high-volume retail community "
+            "(WSB-equivalent); r/IndiaInvestments trends more measured/long-term; "
+            "r/stocks is kept for discussion of the company's US-listed ADR, if any."
+        )
+        stocktwits_note = (
+            "\n\nThis is an Indian (NSE/BSE) equity. StockTwits only has coverage "
+            "for a handful of Indian companies with a verified US-listed ADR — for "
+            "everything else the block below will say so explicitly rather than "
+            "showing zero messages, which is a *coverage gap*, not a *neutral "
+            "reading*. Do not let an empty StockTwits block pull your overall "
+            "score toward Neutral; weight the Reddit and news sources more "
+            "heavily instead and say plainly that StockTwits had no data."
+        )
+    else:
+        reddit_subs = ", ".join(f"r/{s}" for s in DEFAULT_SUBREDDITS)
+        reddit_character = (
+            "r/wallstreetbets is often contrarian/exuberant; r/stocks more "
+            "measured; r/investing longer-term."
+        )
+        stocktwits_note = ""
+
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
 
 ## Data sources (pre-fetched, in this prompt)
@@ -149,14 +176,14 @@ Institutional framing. Fact-driven, slower-moving signal.
 <end_of_news>
 
 ### StockTwits messages — retail-trader social platform indexed by cashtag
-Fast-moving signal. Each message carries a user-labeled sentiment tag (Bullish / Bearish / no-label) plus the message body.
+Fast-moving signal. Each message carries a user-labeled sentiment tag (Bullish / Bearish / no-label) plus the message body.{stocktwits_note}
 
 <start_of_stocktwits>
 {stocktwits_block}
 <end_of_stocktwits>
 
-### Reddit posts — r/wallstreetbets, r/stocks, r/investing (past 7 days)
-Community discussion. Engagement signal via upvote score and comment count. Subreddit character matters (r/wallstreetbets is often contrarian/exuberant; r/stocks more measured; r/investing longer-term).
+### Reddit posts — {reddit_subs} (past 7 days)
+Community discussion. Engagement signal via upvote score and comment count. Subreddit character matters ({reddit_character})
 
 <start_of_reddit>
 {reddit_block}

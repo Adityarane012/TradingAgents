@@ -7,6 +7,25 @@ from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
     get_verified_market_snapshot,
 )
+from tradingagents.dataflows.symbol_utils import is_india_ticker
+
+# India VIX (^INDIAVIX on Yahoo) is NSE's own domestic fear gauge, computed
+# from Nifty option quotes — the CBOE VIX is a US-market proxy at best for
+# Indian equities. It's reachable through the existing get_stock_data tool
+# with no new vendor or credentials; the guidance just tells the model to
+# call it.
+_INDIA_VIX_GUIDANCE = (
+    "\n\nThis is an Indian (NSE/BSE) equity. Also call get_stock_data for "
+    "`^INDIAVIX` over the same window — it's NSE's own volatility/fear gauge "
+    "(computed from Nifty option quotes) and a more direct domestic signal "
+    "than the CBOE VIX. Rough reference bands: below 12 is complacency, "
+    "12-20 is normal, 20-30 is elevated fear, above 30 is crisis-level — but "
+    "read the actual fetched level and trend rather than asserting a band "
+    "without the data in hand. Also keep in mind NSE's weekly Nifty/Bank "
+    "Nifty F&O expiry can inject expiry-day volatility unrelated to the "
+    "underlying trend; if today falls near an expiry, note that as context "
+    "for any short-term volatility spike rather than over-reading it."
+)
 
 
 def create_market_analyst(llm):
@@ -14,6 +33,7 @@ def create_market_analyst(llm):
     def market_analyst_node(state):
         current_date = state["trade_date"]
         instrument_context = get_instrument_context_from_state(state)
+        ticker = state.get("company_of_interest", "")
 
         tools = [
             get_stock_data,
@@ -52,6 +72,7 @@ Before writing the final report, call get_verified_market_snapshot for this tick
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
+            + (_INDIA_VIX_GUIDANCE if is_india_ticker(ticker) else "")
             + get_language_instruction()
         )
 
