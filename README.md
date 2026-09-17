@@ -145,7 +145,18 @@ export ZHIPU_CN_API_KEY=...        # GLM via BigModel (China, open.bigmodel.cn)
 export MINIMAX_API_KEY=...         # MiniMax — Global (api.minimax.io)
 export MINIMAX_CN_API_KEY=...      # MiniMax — China (api.minimaxi.com)
 export OPENROUTER_API_KEY=...      # OpenRouter
-export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
+```
+
+### Optional data vendors
+
+Alpha Vantage and FRED are market-data vendors, not LLM providers — neither is required. `yfinance` is the zero-config default for prices, fundamentals, and news; FRED (macro indicators) is the default in `data_vendors`, but the news analyst degrades to a clear "unavailable" message without a key rather than failing the run.
+
+```bash
+export ALPHA_VANTAGE_API_KEY=...   # Alternative vendor for prices, fundamentals, news.
+                                    # Free tier: 25 requests/day, 5 requests/minute —
+                                    # https://www.alphavantage.co/support/#api-key
+export FRED_API_KEY=...            # Macro indicators (CPI, Fed funds rate, yields, ...).
+                                    # Free: https://fred.stlouisfed.org/docs/api/api_key.html
 ```
 
 For Azure OpenAI, copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
