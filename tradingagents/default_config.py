@@ -2,6 +2,43 @@ import os
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
+# Mapping from exchange suffix to region code for auto-selecting news queries.
+SUFFIX_TO_REGION = {
+    ".NS": "IN", ".BO": "IN",
+    ".T": "JP",
+    ".L": "UK",
+}
+
+# Region-specific macro news queries used when the caller does not supply
+# an explicit ``global_news_queries`` override.  The "US" entry mirrors
+# the DEFAULT_CONFIG default so the behaviour is identical for US tickers.
+REGIONAL_NEWS_QUERIES = {
+    "IN": [
+        "RBI repo rate monetary policy India inflation",
+        "Nifty 50 BSE Sensex earnings GDP India economic outlook",
+        "SEBI regulation FII DII institutional flows India",
+        "India Union Budget fiscal deficit tax policy",
+        "rupee USD INR exchange rate RBI intervention",
+    ],
+    "JP": [
+        "Bank of Japan monetary policy interest rates inflation",
+        "Nikkei 225 earnings GDP Japan economic outlook",
+        "yen USD JPY exchange rate intervention",
+    ],
+    "UK": [
+        "Bank of England interest rates UK inflation",
+        "FTSE 100 earnings UK economic outlook GDP",
+        "pound sterling GBP USD exchange rate",
+    ],
+    "US": [
+        "Federal Reserve interest rates inflation",
+        "S&P 500 earnings GDP economic outlook",
+        "geopolitical risk trade war sanctions",
+        "ECB Bank of England BOJ central bank policy",
+        "oil commodities supply chain energy",
+    ],
+}
+
 # Single source of truth for env-var → config-key overrides. To expose
 # a new config key for environment-based override, add a row here — no
 # entry-point script changes required. Coercion is driven by the type
