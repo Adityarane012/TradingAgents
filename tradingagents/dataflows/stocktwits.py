@@ -143,7 +143,15 @@ def fetch_stocktwits_messages(
         # OSError covers URLError/TimeoutError/connection resets; HTTPException
         # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
         logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
-        return f"<stocktwits unavailable: {type(exc).__name__}>"
+        # Same wording as every other source's failure (Reddit, India news,
+        # NSE, RBI, screener): name the source, give the reason, and say
+        # explicitly that this is not silence. Without that last clause the
+        # analyst can read a failed fetch as "nobody is discussing this",
+        # which is the exact misreading #1295 was filed for.
+        return (
+            f"<StockTwits unavailable: {type(exc).__name__}; "
+            f"this is not an absence of discussion>"
+        )
 
     messages = data.get("messages", []) if isinstance(data, dict) else []
     messages = _within_window(messages, start_date, end_date)

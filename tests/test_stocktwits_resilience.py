@@ -61,7 +61,10 @@ class TestStockTwitsResilience:
         with patch.object(stocktwits, "urlopen", return_value=_raise(exc)):
             out = stocktwits.fetch_stocktwits_messages("NVDA")
         assert "unavailable" in out.lower()
-        assert out.startswith("<stocktwits unavailable")
+        # Must match the wording every other source uses: named source,
+        # reason, and an explicit statement that this is not silence.
+        assert out.startswith("<StockTwits unavailable")
+        assert "this is not an absence of discussion" in out
 
 
 # ── Symbol mapping (crypto, exchange-suffix, passthrough) ────────────

@@ -237,3 +237,53 @@ class TestAnalystWiring:
             for factory in (create_news_analyst, create_fundamentals_analyst):
                 system = self._capture_prompt(factory, self._state("RELIANCE.NS"))
                 assert dead in system
+
+
+class TestFailureWordingIsConsistentAcrossSources:
+    """Every source must report a failed fetch the same way, because the
+    analyst is told to treat '<... unavailable ...>' as a specific signal.
+    An outlier that omits the "not an absence" clause invites the model to
+    read a failed fetch as genuine silence (#1295)."""
+
+    def _all_sentinels(self) -> list[str]:
+        from tradingagents.dataflows.india_data_common import sentinel
+
+        return [
+            sentinel("NSE FII/DII flows", "HTTP 403"),
+            sentinel("RBI policy rates", "HTTP 503"),
+            sentinel("screener.in data for X.NS", "HTTP 404"),
+        ]
+
+    def test_shared_helper_output_has_the_required_shape(self):
+        for text in self._all_sentinels():
+            assert text.startswith("<") and text.endswith(">")
+            assert "unavailable:" in text
+            assert "not an absence of data" in text
+
+    def test_every_india_module_routes_failures_through_the_helper(self):
+        """A module that hand-rolls its own wording will drift; these three
+        must keep using the shared sentinel()."""
+        import inspect
+
+        from tradingagents.dataflows import nse_india, rbi_rates, screener_in
+
+        for module in (nse_india, rbi_rates, screener_in):
+            source = inspect.getsource(module)
+            assert "sentinel(" in source, f"{module.__name__} stopped using sentinel()"
+
+    def test_the_older_sources_still_say_it_is_not_silence(self):
+        """reddit/india_news/stocktwits predate the shared helper and word it
+        per-source ('discussion', 'news'), which is fine — but the clause
+        itself must be there."""
+        import inspect
+
+        from tradingagents.dataflows import india_news, reddit, stocktwits
+
+        for module, phrase in (
+            (reddit, "not an absence of discussion"),
+            (india_news, "not an absence of news"),
+            (stocktwits, "not an absence of discussion"),
+        ):
+            assert phrase in inspect.getsource(module), (
+                f"{module.__name__} lost its 'not an absence' clause"
+            )

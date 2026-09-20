@@ -3,8 +3,8 @@
 The preset exists because free tiers are bounded by different things and only
 one of them clears this pipeline's token budget. Measured 2026-09-20:
 
-    Gemini flash-lite  1,000 req/day, 15 rpm, 250,000 tokens/min -> ~33
-                       tickers/day at a measured ~30 requests each
+    Gemini flash-lite  500 req/day (this key; guides claim 1,000), 15 rpm,
+                       250,000 tokens/min -> ~33 tickers at ~15 requests each
     Groq                  30 rpm but 6,000 tokens/min  <- a single market
                           analyst turn can exceed this on its own
     OpenRouter :free      20 rpm but 50 req/day at zero balance

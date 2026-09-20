@@ -194,11 +194,11 @@ python scripts/analyze_india_universe.py --free --resume --no-reddit
 
 `--free` selects Gemini's free tier, restricts data to keyless vendors, and halves the per-ticker token cost. It needs `GOOGLE_API_KEY` — free, no card, from [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
 
-Why Gemini and not the others (limits measured 2026-09-20). A ticker costs roughly **30 requests**, not the ~13 first estimated: each analyst makes several tool-call rounds and every round is its own request. Measured on a real 50-ticker run, the daily quota ran out after ~33 tickers:
+Why Gemini and not the others. A ticker costs about **15 requests**, and the binding limit is **requests per day**. Read your own cap off a 429 rather than a docs page: published guides say 1,000/day for flash-lite, but the error returned by this key said `PerDay, limit: 500`. At 500 a day that is ~33 tickers, measured on a real 50-ticker run:
 
 | Free tier | Limits | Verdict for a batch |
 |---|---|---|
-| **Gemini flash-lite** | 1,000 req/day · 15 rpm · **250k tokens/min** | **Workable** — about 33 tickers/day (measured) |
+| **Gemini flash-lite** | **500 req/day (measured on this key)** · 15 rpm · 250k tokens/min | **Workable** — about 33 tickers/day |
 | Groq | 30 rpm · **6k tokens/min** | A single market-analyst turn can exceed the token budget |
 | OpenRouter `:free` | 20 rpm · **50 req/day** at zero balance | About 3 tickers/day |
 | Ollama (local) | Unlimited, offline | Free forever, but small local models are unreliable at the structured output and tool calls this pipeline needs |

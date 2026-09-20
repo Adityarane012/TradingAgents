@@ -74,14 +74,18 @@ _ENV_OVERRIDES = {
 # Zero-cost preset. Every entry below was chosen against a measured free-tier
 # limit rather than a marketing page (checked 2026-09-20):
 #
-#   Gemini free tier  - 1,000 req/day, 15 req/min, 250,000 tokens/min on
-#                       flash-lite. MEASURED on a real 50-ticker run
-#                       (2026-09-20): the quota ran out after ~33 tickers, so
-#                       a ticker costs roughly 30 requests, not the ~13 first
-#                       estimated here. Each analyst makes several tool-call
-#                       rounds, and every round is its own request. Budget
-#                       ~30/ticker: ~33 tickers/day, and a 50-name universe
-#                       needs two days or a --limit split.
+#   Gemini free tier  - the binding limit is REQUESTS PER DAY, and the real
+#                       number came from the 429 itself, not from any docs
+#                       page: "generate_content_free_tier_requests, PerDay,
+#                       limit: 500". Published guides say 1,000 for
+#                       flash-lite; this key gets 500. Measured on a real
+#                       50-ticker run (2026-09-20): 500 requests covered ~33
+#                       tickers, so a ticker costs ~15 requests (four
+#                       analysts plus researchers, trader, risk and
+#                       portfolio, each analyst running a short tool-call
+#                       loop). Budget ~15/ticker against YOUR key's own
+#                       PerDay limit -- read it off a 429 rather than
+#                       trusting a table, since it varies.
 #   Groq free tier    - 30 req/min but only 6,000 tokens/min. A single market
 #                       analyst turn can exceed that on its own, which is why
 #                       an earlier Groq batch run died on rate limits.
