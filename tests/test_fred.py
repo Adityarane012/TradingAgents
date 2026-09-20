@@ -64,10 +64,18 @@ class FredResolutionTests(unittest.TestCase):
     def test_india_alias_maps_to_series_id(self):
         self.assertEqual(fred._resolve_series_id("india_cpi"), "INDCPIALLMINMEI")
         self.assertEqual(fred._resolve_series_id("india_inflation"), "INDCPIALLMINMEI")
-        self.assertEqual(fred._resolve_series_id("india_discount_rate"), "INTDSRINM193N")
         self.assertEqual(fred._resolve_series_id("india_10y_yield"), "INDIRLTLT01STM")
         self.assertEqual(fred._resolve_series_id("usdinr"), "DEXINUS")
         self.assertEqual(fred._resolve_series_id("india_gdp_per_capita"), "INDGDPRPCPPPT")
+
+    def test_dead_india_discount_rate_alias_is_not_offered(self):
+        """INTDSRINM193N last updated July 2022 (5.15%) while the actual repo
+        rate is 5.25%. An alias that answers "the RBI rate" with a four-year-old
+        number is worse than no alias, so it was removed; the raw series ID
+        still resolves for anyone who deliberately wants the dead series."""
+        with self.assertRaises(ValueError):
+            fred._resolve_series_id("india_discount_rate")
+        self.assertEqual(fred._resolve_series_id("INTDSRINM193N"), "INTDSRINM193N")
 
     def test_descriptive_phrase_is_rejected(self):
         # An LLM phrase (spaces / too long) is not a series ID — reject up front

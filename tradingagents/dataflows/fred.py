@@ -77,25 +77,94 @@ MACRO_SERIES = {
     "housing_starts": "HOUST",
     "retail_sales": "RSAFS",
     # India macro, sourced through FRED from IMF/OECD upstream data. These
-    # series update far less often than the domestic US ones above — some
-    # IMF/OECD India series have gone months between updates or stopped
-    # being refreshed for a period — and could not be checked live against
-    # the FRED API while writing this (no FRED_API_KEY configured in this
-    # environment, and fred.stlouisfed.org was unreachable from it). A raw
-    # FRED series ID always works regardless of this alias table (see
-    # _resolve_series_id below), so treat these as a convenience, not a
-    # guarantee of freshness — read the as-of date FRED returns with the
-    # value rather than assuming it's current, and say so in the report if
-    # it's stale.
-    "india_cpi": "INDCPIALLMINMEI",  # India CPI, All Items (OECD MEI)
+    # update far less often than the domestic US series above, so each one's
+    # freshness was checked against FRED directly on 2026-09-20 rather than
+    # assumed. The report warns when a series' latest observation is old for
+    # its own frequency (see _staleness_warning), which matters most here.
+    #
+    # Deliberately NOT aliased: INTDSRINM193N, once exposed as
+    # "india_discount_rate". Its last observation is July 2022 — it would have
+    # answered "what is the RBI rate?" with 5.15% when the actual policy repo
+    # rate is 5.25%, which is worse than having no alias at all. FRED has no
+    # live India policy-rate series; rbi_rates.py scrapes the real ones from
+    # RBI and they are injected into the news analyst's prompt directly.
+    # A raw series ID still works (see _resolve_series_id) for anyone who
+    # specifically wants the discontinued IMF series.
+    "india_cpi": "INDCPIALLMINMEI",  # India CPI, All Items (OECD MEI).
     "india_inflation": "INDCPIALLMINMEI",  # alias for india_cpi
-    "india_discount_rate": "INTDSRINM193N",  # India discount rate (IMF IFS) —
-    # a policy-adjacent rate, NOT the RBI repo rate specifically; FRED has no
-    # dedicated repo-rate series for India as of this writing.
-    "india_10y_yield": "INDIRLTLT01STM",  # India 10Y govt bond yield (OECD MEI)
-    "usdinr": "DEXINUS",  # USD/INR exchange rate, daily (Fed H.10)
+    # ^ Both lag badly: latest observation was March 2025 as of 2026-09-20.
+    #   Kept because it is the only India CPI on FRED, and the staleness
+    #   warning makes the lag explicit in the report rather than hiding it.
+    "india_10y_yield": "INDIRLTLT01STM",  # India 10Y govt bond yield — current
+    "usdinr": "DEXINUS",  # USD/INR, daily (Fed H.10) — current
     "india_gdp_per_capita": "INDGDPRPCPPPT",  # India GDP/capita, PPP (IMF WEO, annual)
 }
+
+# How stale a series' latest observation may be, by FRED's own frequency
+# label, before the report says so. Generous: each allows a missed release
+# plus reporting lag, so a warning means genuinely behind, not merely between
+# publications. Frequencies not listed here are not checked.
+_STALENESS_LIMIT_DAYS = {
+    "daily": 10,
+    "weekly": 24,
+    "biweekly": 45,
+    "monthly": 100,
+    "quarterly": 220,
+    "semiannual": 400,
+    "annual": 800,
+}
+
+
+# Aliases that were offered and then withdrawn, with the reason. Answering a
+# retired name with a pointer beats answering it with a dead number, and beats
+# an unexplained "not found".
+RETIRED_ALIASES = {
+    "india_discount_rate": (
+        "'india_discount_rate' was removed: the FRED series behind it "
+        "(INTDSRINM193N, IMF IFS) stopped updating in July 2022, so it would "
+        "report a policy rate several years out of date. FRED publishes no "
+        "live India policy-rate series. The current RBI repo, SDF, MSF, CRR "
+        "and SLR are provided to you directly in the India market data "
+        "section of this prompt — read them from there. Pass the raw ID "
+        "'INTDSRINM193N' if you specifically want the discontinued series."
+    ),
+    "rbi_lending_rate": (
+        "'rbi_lending_rate' is not a FRED series. FRED publishes no live India "
+        "policy-rate series; the current RBI repo, SDF, MSF, CRR and SLR are "
+        "provided directly in the India market data section of this prompt."
+    ),
+}
+
+
+def _staleness_warning(frequency: str, last_date: str, curr_date: str) -> str:
+    """A warning line when the newest observation is old for this series'
+    frequency, or ``""``.
+
+    A stale series is the failure mode that reads most like success: FRED
+    returns a clean value with a real date, and nothing about it says "this
+    number stopped being updated years ago" unless someone reads the date.
+    Spelling it out keeps an analyst from citing a dead series as current.
+    """
+    limit = next(
+        (days for name, days in _STALENESS_LIMIT_DAYS.items() if name in frequency.lower()),
+        None,
+    )
+    if limit is None:
+        return ""
+    try:
+        age = (
+            datetime.strptime(curr_date, "%Y-%m-%d") - datetime.strptime(last_date, "%Y-%m-%d")
+        ).days
+    except ValueError:
+        return ""
+    if age <= limit:
+        return ""
+    return (
+        f"\n> **Stale series.** The newest observation is {last_date}, {age} days "
+        f"before {curr_date}, which is well behind this series' {frequency.lower()} "
+        f"schedule. Treat it as a historical reading, not the current level, and "
+        f"say so if you cite it.\n"
+    )
 
 
 class FredNotConfiguredError(VendorNotConfiguredError):
@@ -129,6 +198,11 @@ def _resolve_series_id(indicator: str) -> str:
     key = indicator.strip().lower().replace(" ", "_").replace("-", "_")
     if key in MACRO_SERIES:
         return MACRO_SERIES[key]
+    if key in RETIRED_ALIASES:
+        # Without this the name would fall through as a "plausible series ID",
+        # become INDIA_DISCOUNT_RATE, and come back as a bare "series not
+        # found" — no hint that the data exists elsewhere.
+        raise ValueError(RETIRED_ALIASES[key])
     candidate = indicator.strip().upper()
     # FRED series IDs never contain whitespace and are short; reject anything
     # else (a descriptive phrase the LLM passed) rather than 400ing the API.
@@ -275,6 +349,8 @@ def get_macro_data(
         )
     except ValueError:
         summary = f"\n**Latest:** {last_val} ({last_date})\n"
+
+    summary += _staleness_warning(frequency, last_date, curr_date)
 
     shown = points
     note = ""

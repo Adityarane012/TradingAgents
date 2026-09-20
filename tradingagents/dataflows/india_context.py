@@ -36,6 +36,7 @@ from .nse_india import (
     nifty_pcr_block,
     shareholding_block,
 )
+from .rbi_rates import policy_rates_block
 from .symbol_utils import is_india_ticker
 
 # Announcement text is the only unbounded part of these blocks (a filing
@@ -67,12 +68,17 @@ def india_market_context(ticker: str, curr_date: str | date | None = None) -> st
     if not india_data_enabled(ticker):
         return ""
     return (
-        "\n\n### Live India market data (NSE)\n"
-        "These figures were fetched directly from NSE and pasted in; there is no "
-        "tool to re-query them. Each line carries its own as-of date — cite it, and "
-        "if a line reads '<... unavailable ...>' then that fetch failed, which is "
-        "NOT the same as the value being zero or the event not happening. Never "
-        "substitute a remembered or estimated figure for one marked unavailable.\n"
+        "\n\n### Live India market data (NSE and RBI)\n"
+        "These figures were fetched directly from the exchange and the central "
+        "bank and pasted in; there is no tool to re-query them. Each line states "
+        "its own as-of date (or says it has none) — cite it, and if a line reads "
+        "'<... unavailable ...>' then that fetch failed, which is NOT the same as "
+        "the value being zero or the event not happening. Never substitute a "
+        "remembered or estimated figure for one marked unavailable.\n"
+        # RBI's box has no as-of date, so policy_rates_block refuses a
+        # historical run outright — on those, this line is a sentinel saying
+        # exactly that, which is the honest answer.
+        f"- Policy rates: {policy_rates_block(curr_date)}\n"
         f"- Institutional flows: {fii_dii_block(curr_date)}\n"
         f"- Volatility & index: {market_levels_block(curr_date)}\n"
         f"- Options positioning: {nifty_pcr_block(curr_date)}\n"

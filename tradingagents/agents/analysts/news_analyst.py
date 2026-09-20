@@ -14,23 +14,28 @@ from tradingagents.dataflows.symbol_utils import is_india_ticker
 # India-specific macro aliases resolve through FRED's MACRO_SERIES table
 # (tradingagents/dataflows/fred.py) — sourced from IMF/OECD and slower-moving
 # than the domestic US series, so the guidance below asks for the as-of date
-# rather than implying central-bank-fresh data.
+# rather than implying central-bank-fresh data. RBI policy rates are NOT
+# among them: FRED's India discount-rate series stopped updating in 2022,
+# so the live repo/SDF/MSF/CRR/SLR are scraped from RBI and injected as
+# part of the market context block below (see india_context).
 _INDIA_NEWS_GUIDANCE = (
     "\n\nThis is an Indian (NSE/BSE) equity. In addition to the US-centric "
-    "aliases above, get_macro_indicators also accepts 'india_cpi' (India "
-    "CPI), 'usdinr' (USD/INR rate), and 'india_discount_rate' (India "
-    "discount rate — not literally the RBI repo rate; FRED has no dedicated "
-    "repo-rate series for India). These IMF/OECD-sourced series update on a "
-    "slower cadence than US series — read the as-of date in the tool output "
-    "and say so if the latest observation looks dated, rather than treating "
-    "it as current. 'fed_funds_rate', 'dollar_index', and 'vix' remain "
-    "relevant here too: US rate/dollar moves drive FII flows into and out of "
-    "India. For get_global_news and get_news, weigh domestic catalysts you "
-    "already know from general knowledge — RBI Monetary Policy Committee "
-    "decisions, the Union Budget, NSE F&O expiry dynamics, and FII/DII daily "
-    "flow direction — but only report them as fact when a tool result or "
-    "explicit context confirms them for the current date; otherwise flag "
-    "them as things to watch rather than asserting today's number."
+    "aliases above, get_macro_indicators also accepts 'india_cpi' (India CPI), "
+    "'usdinr' (USD/INR rate) and 'india_10y_yield'. These IMF/OECD-sourced "
+    "series update on a slower cadence than US ones — read the as-of date in "
+    "the tool output and say so if the latest observation looks dated, rather "
+    "than treating it as current; the tool marks a series that has fallen "
+    "behind its own publication schedule. Do NOT ask it for an RBI policy "
+    "rate: FRED has no live India policy-rate series, and the current repo, "
+    "SDF, MSF, CRR and SLR are supplied directly in the market data below. "
+    "'fed_funds_rate', 'dollar_index', and 'vix' remain relevant here too: US "
+    "rate/dollar moves drive FII flows into and out of India. For "
+    "get_global_news and get_news, weigh domestic catalysts you already know "
+    "from general knowledge — RBI Monetary Policy Committee decisions, the "
+    "Union Budget, NSE F&O expiry dynamics, and FII/DII daily flow direction "
+    "— but only report them as fact when a tool result or explicit context "
+    "confirms them for the current date; otherwise flag them as things to "
+    "watch rather than asserting today's number."
 )
 
 

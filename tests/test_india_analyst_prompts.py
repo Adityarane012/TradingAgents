@@ -90,7 +90,10 @@ class TestNewsAnalystIndiaPrompt:
         text = _prompt_text(captured)
         assert "india_cpi" in text
         assert "usdinr" in text
-        assert "india_discount_rate" in text
+        # india_discount_rate was deliberately dropped: its FRED series died in
+        # July 2022. The prompt now steers to the live RBI rates instead.
+        assert "india_discount_rate" not in text
+        assert "Do NOT ask it for an RBI policy rate" in text
         assert "RBI Monetary Policy Committee" in text
 
     def test_us_ticker_gets_no_india_macro_guidance(self):
