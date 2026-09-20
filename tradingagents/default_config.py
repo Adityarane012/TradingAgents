@@ -54,6 +54,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_REDDIT_ENABLED":       "reddit_enabled",
+    "TRADINGAGENTS_REDDIT_MAX_WAIT_SECONDS": "reddit_max_wait_seconds",
     "TRADINGAGENTS_INDIA_DATA_ENABLED":   "india_data_enabled",
     "TRADINGAGENTS_INDIA_MAX_STALENESS_DAYS": "india_max_staleness_days",
     "TRADINGAGENTS_SCREENER_ENABLED":     "screener_enabled",
@@ -171,6 +172,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # limit entirely, or set this False to skip Reddit and fall back to
     # News + StockTwits only.
     "reddit_enabled": True,
+    # Longest a single Reddit fetch may block waiting for the anonymous per-IP
+    # rate-limit window to reset. Reddit states the window on every response
+    # (x-ratelimit-reset, typically 12-60s); waiting exactly that long is what
+    # makes the RSS path return data instead of 429s. Past this cap the fetch
+    # is reported unavailable rather than stalling the run, so one ticker's
+    # three subreddits cost at most ~3x this. A large batch is still better
+    # served by reddit_enabled=False / --no-reddit.
+    "reddit_max_wait_seconds": 75,
     # NSE India context (FII/DII flows, India VIX, Nifty PCR, promoter
     # shareholding, corporate actions, exchange announcements) injected into
     # the news and fundamentals analysts for .NS/.BO tickers. Ignored entirely

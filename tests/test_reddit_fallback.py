@@ -499,3 +499,119 @@ class TestOAuthDispatch:
         json_fetch.assert_called_once()
         rss.assert_called_once()
         assert out == rss_posts
+
+
+class _Hdrs(dict):
+    """Case-insensitive header mapping, like http.client's."""
+
+    def get(self, key, default=None):
+        return super().get(key.lower(), default)
+
+
+def _resp_with(headers: dict, body: bytes = b"<feed/>"):
+    class _R:
+        def __init__(self):
+            self.headers = _Hdrs({k.lower(): v for k, v in headers.items()})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, size=-1):
+            return body
+
+    return _R()
+
+
+class TestRateLimitHeaders:
+    """Reddit states its per-IP budget on every response, including 429s.
+
+    Measured 2026-09-20: one request exhausts the window (remaining 0.0) and
+    x-ratelimit-reset counts down ~12-60s. The 429 carries NO Retry-After but
+    DOES carry x-ratelimit-reset, so the old blind 60s fallback waited far
+    longer than Reddit actually asked for.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        reddit._RATE_LIMIT.reset()
+        yield
+        reddit._RATE_LIMIT.reset()
+
+    def test_a_spent_budget_makes_the_next_call_wait(self):
+        reddit._RATE_LIMIT.observe(
+            _Hdrs({"x-ratelimit-remaining": "0.0", "x-ratelimit-reset": "12"})
+        )
+        assert reddit._RATE_LIMIT.seconds_until_slot() > 10
+
+    def test_remaining_budget_means_no_wait(self):
+        reddit._RATE_LIMIT.observe(
+            _Hdrs({"x-ratelimit-remaining": "5", "x-ratelimit-reset": "30"})
+        )
+        assert reddit._RATE_LIMIT.seconds_until_slot() == 0.0
+
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {"x-ratelimit-remaining": "lots", "x-ratelimit-reset": "soon"},
+            {},
+            None,
+        ],
+    )
+    def test_missing_or_unparseable_headers_are_ignored(self, headers):
+        reddit._RATE_LIMIT.observe(_Hdrs(headers) if headers is not None else None)
+        assert reddit._RATE_LIMIT.seconds_until_slot() == 0.0
+
+    def test_wait_is_skipped_when_it_would_exceed_the_cap(self):
+        reddit._RATE_LIMIT.observe(
+            _Hdrs({"x-ratelimit-remaining": "0", "x-ratelimit-reset": "600"})
+        )
+        slept = []
+        with patch.object(reddit.time, "sleep", slept.append):
+            assert reddit._RATE_LIMIT.wait_for_slot(max_wait=75) is False
+        assert slept == []
+
+    def test_wait_happens_when_within_the_cap(self):
+        reddit._RATE_LIMIT.observe(
+            _Hdrs({"x-ratelimit-remaining": "0", "x-ratelimit-reset": "12"})
+        )
+        slept = []
+        with patch.object(reddit.time, "sleep", slept.append):
+            assert reddit._RATE_LIMIT.wait_for_slot(max_wait=75) is True
+        assert len(slept) == 1 and slept[0] > 10
+
+    def test_429_uses_the_reset_header_not_the_blind_fallback(self):
+        """The bug this fixes: no Retry-After, so the old code slept 60s while
+        the response itself said 12."""
+        exc = HTTPError("u", 429, "t", _Hdrs({"x-ratelimit-reset": "12"}), None)
+        assert reddit._retry_after_seconds(exc) is None
+        assert reddit._reset_after_seconds(exc) == 12.0
+
+    def test_retry_after_still_wins_when_present(self):
+        exc = HTTPError(
+            "u", 429, "t", _Hdrs({"retry-after": "5", "x-ratelimit-reset": "40"}), None
+        )
+        assert reddit._retry_after_seconds(exc) == 5.0
+
+    def test_a_spent_budget_skips_the_request_entirely(self):
+        reddit._RATE_LIMIT.observe(
+            _Hdrs({"x-ratelimit-remaining": "0", "x-ratelimit-reset": "600"})
+        )
+        called = []
+
+        def _urlopen(*a, **k):
+            called.append(1)
+            raise AssertionError("should not have been called")
+
+        with patch.object(reddit, "urlopen", _urlopen):
+            result = reddit._fetch_subreddit_rss("TCS", "stocks", 5, 10.0)
+        assert result is None  # unavailable, not "no posts found"
+        assert called == []
+
+    def test_a_successful_response_updates_the_budget(self):
+        resp = _resp_with({"x-ratelimit-remaining": "0.0", "x-ratelimit-reset": "30"})
+        with patch.object(reddit, "urlopen", lambda *a, **k: resp):
+            reddit._fetch_subreddit_rss("TCS", "stocks", 5, 10.0)
+        assert reddit._RATE_LIMIT.seconds_until_slot() > 25

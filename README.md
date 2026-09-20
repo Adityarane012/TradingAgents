@@ -169,6 +169,8 @@ export REDDIT_CLIENT_SECRET=...    # Reddit's public RSS feed, which shares a st
                                     # its Data Access Request form before you can create one.
 ```
 
+Without those credentials the anonymous RSS path is used, and it now reads Reddit's own rate-limit headers and waits exactly as long as Reddit asks (typically 12-60s) instead of failing. That makes a single-ticker run return real posts rather than `<unavailable>`, at roughly 40s per subreddit; a fetch needing longer than `reddit_max_wait_seconds` (default 75) is reported unavailable rather than stalling the run. For a multi-ticker batch, `--no-reddit` is still the better answer.
+
 For Azure OpenAI, copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
 
 For AWS Bedrock, install the extra with `pip install ".[bedrock]"`, set `llm_provider: "bedrock"`, configure AWS credentials (environment variables, `~/.aws/credentials`, or an IAM role) and `AWS_DEFAULT_REGION`, and use a Bedrock model ID, e.g. `us.anthropic.claude-opus-4-8-v1:0`.

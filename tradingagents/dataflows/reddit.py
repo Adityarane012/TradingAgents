@@ -221,6 +221,103 @@ def _jitter(seconds: float, frac: float = 0.2) -> float:
     return seconds * (1.0 + random.uniform(-frac, frac))
 
 
+class _RateLimit:
+    """Process-wide view of Reddit's anonymous per-IP budget.
+
+    Reddit states the budget on every response — ``x-ratelimit-remaining`` and
+    ``x-ratelimit-reset`` (seconds until the window rolls over) — on 429s as
+    well as 200s. Measured 2026-09-20: one request exhausts the window
+    (``remaining: 0.0``) and the reset counts down from roughly 12-60s.
+
+    Reading those headers is what makes Reddit usable at all here. The budget
+    is per-IP and cumulative across a whole run, so spacing requests within one
+    ticker never helped: the limit is shared by every subreddit, every ticker
+    and every concurrent analysis on the same network. Waiting the amount
+    Reddit actually asks for beats both hammering it (429 after 429) and the
+    old blind 60s guess, which was usually far longer than required.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._remaining: float | None = None
+        self._ready_at: float = 0.0
+
+    def observe(self, headers) -> None:
+        """Record the budget stated by a response (200 or 429)."""
+        if headers is None:
+            return
+        try:
+            remaining = headers.get("x-ratelimit-remaining")
+            reset = headers.get("x-ratelimit-reset")
+            with self._lock:
+                if remaining is not None:
+                    self._remaining = float(remaining)
+                if reset is not None:
+                    self._ready_at = time.monotonic() + float(reset)
+        except (TypeError, ValueError):
+            return  # unparseable headers: fall back to the reactive path
+
+    def seconds_until_slot(self) -> float:
+        """How long to wait before the next request is likely to be served."""
+        with self._lock:
+            if self._remaining is None or self._remaining > 0:
+                return 0.0
+            return max(0.0, self._ready_at - time.monotonic())
+
+    def wait_for_slot(self, max_wait: float) -> bool:
+        """Block until the budget refreshes. False when that would exceed
+        ``max_wait`` — the caller then reports the fetch unavailable rather
+        than stalling a batch run for minutes."""
+        delay = self.seconds_until_slot()
+        if delay <= 0:
+            return True
+        if delay > max_wait:
+            logger.warning(
+                "Reddit rate limit needs %.0fs but the cap is %.0fs; skipping this fetch.",
+                delay, max_wait,
+            )
+            return False
+        logger.info("Reddit rate limit: waiting %.0fs for the window to reset.", delay)
+        time.sleep(delay)
+        with self._lock:
+            self._remaining = None  # assume a fresh window until told otherwise
+        return True
+
+    def reset(self) -> None:
+        with self._lock:
+            self._remaining = None
+            self._ready_at = 0.0
+
+
+_RATE_LIMIT = _RateLimit()
+
+# How long a single fetch may block waiting for Reddit's window. One ticker's
+# three subreddits can therefore cost about three of these in the worst case,
+# which is why a large batch is still better served by --no-reddit.
+_DEFAULT_MAX_WAIT = 75.0
+
+
+def _max_wait_seconds() -> float:
+    from .config import get_config
+
+    return float(get_config().get("reddit_max_wait_seconds", _DEFAULT_MAX_WAIT))
+
+
+def _reset_after_seconds(exc: HTTPError) -> float | None:
+    """Seconds until the budget resets, per the 429's own headers.
+
+    Reddit omits ``Retry-After`` on these 429s but does send
+    ``x-ratelimit-reset``, so this is usually the difference between waiting
+    the ~12s actually required and the 60s the blind fallback assumed.
+    """
+    try:
+        headers = getattr(exc, "headers", None)
+        reset = headers.get("x-ratelimit-reset") if headers else None
+        return min(float(reset), 120.0) if reset is not None else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def _retry_after_seconds(exc: HTTPError) -> float | None:
     """Seconds to wait from a 429's ``Retry-After`` header, capped at 60s.
 
@@ -276,15 +373,33 @@ def _fetch_subreddit_rss(
     """
     url = _RSS.format(sub=sub, qs=_search_qs(ticker, limit))
     req = Request(url, headers={"User-Agent": _UA})
+    # Proactive: if Reddit already told us the budget is spent, wait for the
+    # window it named rather than spending this request on a certain 429.
+    if not _RATE_LIMIT.wait_for_slot(_max_wait_seconds()):
+        return None
     try:
         with urlopen(req, timeout=timeout) as resp:
+            # getattr, not attribute access: a response without headers must
+            # still be parsed, not turned into a failed fetch.
+            _RATE_LIMIT.observe(getattr(resp, "headers", None))
             root = ET.fromstring(_read_capped(resp))
     except HTTPError as exc:
+        _RATE_LIMIT.observe(getattr(exc, "headers", None))
         if exc.code == 429 and _retry:
-            # Honour a server-supplied Retry-After exactly (including 0); jitter
-            # only our own fallback so concurrent runs don't retry in lockstep.
+            # Prefer what the response actually states: Retry-After when
+            # present, else x-ratelimit-reset (Reddit sends the latter but not
+            # the former here). Jitter only our own blind fallback, so
+            # concurrent runs don't retry in lockstep.
             retry_after = _retry_after_seconds(exc)
+            if retry_after is None:
+                retry_after = _reset_after_seconds(exc)
             wait = retry_after if retry_after is not None else _jitter(_RETRY_FALLBACK_SECONDS)
+            if wait > _max_wait_seconds():
+                logger.warning(
+                    "Reddit 429 for r/%s · %s needs %.0fs, over the %.0fs cap — giving up.",
+                    sub, ticker, wait, _max_wait_seconds(),
+                )
+                return None
             logger.warning(
                 "Reddit RSS 429 for r/%s · %s — backing off %.1fs then retrying once",
                 sub, ticker, wait,
