@@ -23,7 +23,7 @@ snippets verbatim.
 | I-003 | ✅ Done, corrected | Checked candidate subreddits live: r/IndiaInvestments and r/IndianStreetBets are active (posts from today/3 days ago); **r/DalalStreet's newest post was from January 2024** — dropped rather than shipped as a guaranteed-empty source. Also fixed something this issue didn't mention: the search query itself was never stripped of the exchange suffix, so even a real Indian post would rarely match "RELIANCE.NS" as a literal search term. |
 | I-004 | ✅ Done, corrected | Did NOT add "benchmark against Nifty 50 ~22x" or "83-86 INR/USD" as suggested — those are hardcoded facts that go stale. Instead added `currency`/`financialCurrency` to `resolve_instrument_identity` (agent_utils.py) so every analyst gets a real, live currency fact for ANY non-USD ticker, not just India, and an explicit "read this at face value, don't convert to USD" instruction. Promoter shareholding/pledging guidance was reframed as "tell the model this data isn't available, don't invent it" rather than "always analyze it" — yfinance has no such field, and the original phrasing would have invited fabrication. |
 | I-005 | ✅ Done, bug fixed | The already-merged `feat/regional-news-queries` branch had two bugs that meant it never fired through the real CLI/main.py entry points (both build config as `DEFAULT_CONFIG.copy()`, so the "did the user override this?" presence-check was always true) and could permanently mutate the shared `DEFAULT_CONFIG` object. Fixed both; see the `fix(graph)` commit. |
-| I-006 | ⚠️ Implemented, unverified | Added the aliases, but could not verify them against the live FRED API in this session (no `FRED_API_KEY` configured, and `fred.stlouisfed.org` was unreachable from this sandbox even on the keyless CSV endpoint). Renamed `rbi_lending_rate` to `india_discount_rate` — the underlying series (`INTDSRINM193N`) is IMF's discount-rate series, not literally the RBI repo rate; FRED has no dedicated India repo-rate series. Spot-check the values before relying on them. |
+| I-006 | ❌ **Partly reverted 2026-09-20** | The aliases were added, then checked against FRED directly. `india_discount_rate` (INTDSRINM193N) has not updated since **July 2022** — it reports 5.15% while the actual RBI policy repo rate is 5.25%, so it was **removed**: an alias that answers "the RBI rate" with a four-year-old number is worse than no alias. FRED has no live India policy-rate series at all. Live rates are now scraped from rbi.org.in (`rbi_rates.py`) instead. `india_cpi` is stale too (latest observation March 2025) but kept, since it is the only India CPI on FRED and reports now carry an automatic staleness warning. `usdinr` and `india_10y_yield` are current. |
 | I-008 | ✅ Done | README updated as suggested. |
 | I-009 | ✅ Done | Confirmed `^INDIAVIX` resolves via yfinance with live data before wiring it into the market analyst prompt. |
 | I-010 | ✅ Done | Implemented with the corrected I-006 aliases and softened "always cite RBI/Budget/expiry" into "these are things to watch, not asserted facts" — the model has no live tool for most of them. |
@@ -35,11 +35,40 @@ Also added an opt-in India news RSS vendor (Economic Times + Mint — two of
 the four feeds suggested in `suggestions.md` actually work; Business
 Standard 403s and the Financial Express URL serves HTML, not RSS).
 
-**Investigated and rejected:** the NSE FII/DII/PCR module (`suggestions.md`
-§7.1/7.3) — NSE returned HTTP 403 even on its homepage from this sandbox,
-before any API call. The RBI DBIE portal (§3.4) has a broken/mismatched TLS
-certificate on `dbie.rbi.org.in`. Neither is reliable enough to build a data
-vendor on without further investigation from a different network.
+**Investigated and rejected (2026-09-17) — SUPERSEDED, see below.**
+
+---
+
+## Correction (2026-09-20)
+
+Two conclusions recorded on 2026-09-17 were wrong, and both were acted on:
+
+1. **"NSE returns HTTP 403, so the FII/DII / PCR module cannot be built."**
+   Only nseindia.com's *homepage* 403s. Its JSON API endpoints — the ones the
+   site's own pages call — return 200 with a browser User-Agent, no cookies and
+   no Referer needed. The earlier test never got past the homepage. Built as
+   `tradingagents/dataflows/nse_india.py`: FII/DII flows, India VIX, Nifty level,
+   Nifty put-call ratio, promoter shareholding, corporate actions and exchange
+   announcements, injected into the news and fundamentals analysts.
+   Caveat for whoever maintains this: NSE silently drops non-browser
+   User-Agents (they hang until timeout), and endpoints move — the old
+   `option-chain-indices` URL now 404s.
+
+2. **"RBI DBIE has a broken TLS certificate, so RBI data is unavailable."**
+   True of `dbie.rbi.org.in`, but rbi.org.in's own homepage carries a
+   server-rendered "Current Rates" box with repo, SDF, MSF, bank rate, CRR and
+   SLR. Built as `rbi_rates.py`. It has no as-of date, so it refuses historical
+   runs rather than assert a rate that may not have been in force.
+
+Still not built, and still for the original reasons: X/Twitter (paid API) and
+the SEBI filings scraper (no clean API). **Promoter pledging remains
+unavailable** — NSE's `corporate-pledgedata` endpoint returns empty for every
+symbol tried, including known-pledged names.
+
+Added beyond the original scope: `screener.in` as an opt-in source for the
+FII/DII split within public holding, which NSE's filings do not break out, and
+`scripts/verify_india_sources.py` to cross-check every source live.
+
 
 ---
 

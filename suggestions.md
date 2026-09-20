@@ -22,11 +22,16 @@ claims:
   already worked — verified the env vars and config keys exist and do what
   this doc says. No code change needed, they're just not obvious from the
   README (now they're mentioned there).
-- **§3.3 (NSE India API) and §3.4 (RBI DBIE):** investigated, not built.
-  NSE returned HTTP 403 even on its homepage from this sandbox before any
-  API call was attempted; `dbie.rbi.org.in` has a broken/mismatched TLS
-  certificate. Both need testing from a different network before anyone
-  builds on them — don't assume the endpoints in §3.3's code sketch work.
+- **§3.3 (NSE India API) and §3.4 (RBI DBIE):** ⚠️ the 2026-09-17 note here
+  said both were unreachable. **That was wrong, and both are now built** — see
+  the Correction section in `issues.md`. In short: only nseindia.com's
+  *homepage* 403s, its JSON API answers fine with a browser User-Agent, so
+  §3.3's FII/DII, India VIX and PCR are live in `nse_india.py`; and while
+  `dbie.rbi.org.in` does have a broken certificate, rbi.org.in's homepage
+  carries a parseable rates box, so §3.4's repo/CRR/SLR are live in
+  `rbi_rates.py`. The code sketch in §3.3 is still not a working example — it
+  uses the retired `option-chain-indices` endpoint (now 404) and a session
+  cookie handshake that turns out to be unnecessary.
 - **§7.2 (RSS feeds):** of the four feeds listed, only Economic Times and
   Mint actually serve RSS. Business Standard's markets feed returns HTTP
   403; the Financial Express URL serves an HTML page, not RSS. Implemented
@@ -181,7 +186,7 @@ These are valid raw FRED series IDs — pass them directly to the existing `get_
 # India-specific additions — paste into MACRO_SERIES in fred.py
 "india_cpi":         "INDCPIALLMINMEI",
 "india_inflation":   "INDCPIALLMINMEI",
-"rbi_lending_rate":  "INTDSRINM193N",
+"rbi_lending_rate":  "INTDSRINM193N",   # DEAD: last updated July 2022 - do NOT use
 "india_10y_yield":   "INDIRLTLT01STM",
 "usdinr":            "DEXINUS",
 ```
