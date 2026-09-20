@@ -194,11 +194,11 @@ python scripts/analyze_india_universe.py --free --resume --no-reddit
 
 `--free` selects Gemini's free tier, restricts data to keyless vendors, and halves the per-ticker token cost. It needs `GOOGLE_API_KEY` — free, no card, from [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
 
-Why Gemini and not the others (limits measured 2026-09-20; one ticker costs roughly 13 LLM calls):
+Why Gemini and not the others (limits measured 2026-09-20). A ticker costs roughly **30 requests**, not the ~13 first estimated: each analyst makes several tool-call rounds and every round is its own request. Measured on a real 50-ticker run, the daily quota ran out after ~33 tickers:
 
 | Free tier | Limits | Verdict for a batch |
 |---|---|---|
-| **Gemini flash-lite** | 1,000 req/day · 15 rpm · **250k tokens/min** | **Workable** — about 75 tickers/day |
+| **Gemini flash-lite** | 1,000 req/day · 15 rpm · **250k tokens/min** | **Workable** — about 33 tickers/day (measured) |
 | Groq | 30 rpm · **6k tokens/min** | A single market-analyst turn can exceed the token budget |
 | OpenRouter `:free` | 20 rpm · **50 req/day** at zero balance | About 3 tickers/day |
 | Ollama (local) | Unlimited, offline | Free forever, but small local models are unreliable at the structured output and tool calls this pipeline needs |
@@ -206,6 +206,8 @@ Why Gemini and not the others (limits measured 2026-09-20; one ticker costs roug
 Ollama is still worth having for development — set `llm_provider: "ollama"` and any model you have pulled; no key is required and `OLLAMA_BASE_URL` points at a remote host if you have one. On a 4 GB laptop GPU expect 3B-class models, which are fine for exercising the plumbing and weak at the analysis itself.
 
 **Where the tokens actually go.** The data is not the expensive part — every tool together returns about 6,100 tokens. The cost is the tool-call loop: the agent re-sends its whole message history each round, so the market analyst's 8 indicators mean ~10 rounds and roughly 22,000 tokens. `market_indicator_budget` is the lever; `--free` sets it to 4, which roughly halves tokens per ticker and costs little, since the prompt already asks for non-redundant indicators.
+
+A 50-name universe therefore needs two days, or `--limit 30` today and `--resume` tomorrow. `--resume` skips only tickers that already succeeded, so re-running the same command picks up exactly the ones the quota cut off.
 
 Alpha Vantage is deliberately unused here: its free tier is 25 requests/day, which a single ticker can exhaust. FRED needs a free key but degrades to a sentinel without one, so the run continues either way.
 

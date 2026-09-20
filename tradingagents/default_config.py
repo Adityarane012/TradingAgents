@@ -75,9 +75,13 @@ _ENV_OVERRIDES = {
 # limit rather than a marketing page (checked 2026-09-20):
 #
 #   Gemini free tier  - 1,000 req/day, 15 req/min, 250,000 tokens/min on
-#                       flash-lite. One ticker costs roughly 13 LLM calls, so
-#                       ~75 tickers/day fits. This is the only free tier that
-#                       comfortably clears the token budget of a full run.
+#                       flash-lite. MEASURED on a real 50-ticker run
+#                       (2026-09-20): the quota ran out after ~33 tickers, so
+#                       a ticker costs roughly 30 requests, not the ~13 first
+#                       estimated here. Each analyst makes several tool-call
+#                       rounds, and every round is its own request. Budget
+#                       ~30/ticker: ~33 tickers/day, and a 50-name universe
+#                       needs two days or a --limit split.
 #   Groq free tier    - 30 req/min but only 6,000 tokens/min. A single market
 #                       analyst turn can exceed that on its own, which is why
 #                       an earlier Groq batch run died on rate limits.
