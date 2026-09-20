@@ -157,6 +157,16 @@ export ALPHA_VANTAGE_API_KEY=...   # Alternative vendor for prices, fundamentals
                                     # https://www.alphavantage.co/support/#api-key
 export FRED_API_KEY=...            # Macro indicators (CPI, Fed funds rate, yields, ...).
                                     # Free: https://fred.stlouisfed.org/docs/api/api_key.html
+export REDDIT_CLIENT_ID=...        # Sentiment analyst's Reddit fetch. Without these, it uses
+export REDDIT_CLIENT_SECRET=...    # Reddit's public RSS feed, which shares a strict per-IP rate
+                                    # limit across every analysis on your network — fine for one
+                                    # ticker, but a multi-ticker batch run (e.g.
+                                    # scripts/analyze_india_universe.py) will hit repeated 429s
+                                    # and slow backoffs. With these set it switches to Reddit's
+                                    # OAuth API instead, which has its own per-app budget and also
+                                    # returns real upvote/comment counts RSS can't. A "script" app
+                                    # from reddit.com/prefs/apps; Reddit may require approval via
+                                    # its Data Access Request form before you can create one.
 ```
 
 For Azure OpenAI, copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.

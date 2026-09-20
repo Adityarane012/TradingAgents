@@ -4,6 +4,8 @@ path's degradation (#862), and chunked-transfer error handling (#1024)."""
 from __future__ import annotations
 
 import http.client
+import json
+import time
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -93,10 +95,14 @@ class TestRssParsing:
 
 @pytest.mark.unit
 class TestFetchSubredditIsRssFirst:
-    """The default per-subreddit fetch goes straight to RSS — it must not hit
-    the WAF-blocked JSON endpoint, which only burned rate-limit budget."""
+    """Without OAuth credentials, the per-subreddit fetch goes straight to
+    RSS — it must not hit the WAF-blocked JSON endpoint, which only burned
+    rate-limit budget (issue #862). See TestOAuthDispatch for the
+    credentials-configured half of this behavior."""
 
-    def test_delegates_to_rss_without_touching_json(self):
+    def test_delegates_to_rss_without_touching_json(self, monkeypatch):
+        monkeypatch.delenv("REDDIT_CLIENT_ID", raising=False)
+        monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
         sentinel = [{"title": "x", "source": "rss", "score": None,
                      "num_comments": None, "created_utc": None, "selftext": ""}]
         with patch.object(reddit, "_fetch_subreddit_rss", return_value=sentinel) as rss, \
@@ -109,17 +115,15 @@ class TestFetchSubredditIsRssFirst:
 
 @pytest.mark.unit
 class TestJsonPathFallsBackToRss:
-    """The opt-in JSON path still degrades to RSS on a 403 (kept for #862)."""
+    """The OAuth JSON path reports failure as None; _fetch_subreddit (the
+    dispatcher, not _fetch_subreddit_json itself) is what falls back to RSS
+    — see TestOAuthDispatch below for that half of the contract."""
 
-    def test_403_triggers_rss(self):
+    def test_403_returns_none(self):
         err = HTTPError("url", 403, "Blocked", {}, None)
-        rss_posts = [{"title": "x", "source": "rss", "score": None,
-                      "num_comments": None, "created_utc": None, "selftext": ""}]
-        with patch.object(reddit, "urlopen", side_effect=err), \
-             patch.object(reddit, "_fetch_subreddit_rss", return_value=rss_posts) as rss:
-            out = reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0)
-        rss.assert_called_once()
-        assert out and out[0]["source"] == "rss"
+        with patch.object(reddit, "urlopen", side_effect=err):
+            out = reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0, token="tok")
+        assert out is None
 
 
 @pytest.mark.unit
@@ -178,11 +182,10 @@ class TestChunkedTransferErrorsHandled:
         with patch.object(reddit, "urlopen", return_value=_raise(http.client.IncompleteRead(b""))):
             assert reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0) is None
 
-    def test_json_incomplete_read_falls_back_to_rss(self):
-        with patch.object(reddit, "urlopen", return_value=_raise(http.client.IncompleteRead(b""))), \
-             patch.object(reddit, "_fetch_subreddit_rss", return_value=[]) as rss:
-            reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0)
-        rss.assert_called_once()
+    def test_json_incomplete_read_returns_none(self):
+        with patch.object(reddit, "urlopen", return_value=_raise(http.client.IncompleteRead(b""))):
+            out = reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0, token="tok")
+        assert out is None
 
     def test_oversized_rss_feed_is_refused_not_parsed(self):
         # A hostile/misbehaving endpoint streaming an unbounded body must not be
@@ -366,3 +369,133 @@ class TestIndiaRegionalRouting:
         with patch.object(reddit, "_fetch_subreddit", side_effect=record):
             reddit.fetch_reddit_posts("AAPL", inter_request_delay=0)
         assert seen_tickers == ["AAPL"] * len(reddit.DEFAULT_SUBREDDITS)
+
+
+# ── OAuth token caching + dispatch (#1352) ───────────────────────────
+
+def _token_resp(access_token="tok-abc", expires_in=3600):
+    body = json.dumps({"access_token": access_token, "expires_in": expires_in}).encode()
+    return _resp(lambda: body)
+
+
+@pytest.fixture(autouse=True)
+def _reset_oauth_cache():
+    """The token cache is module-level state — must not leak between tests."""
+    reddit._oauth_token_cache["token"] = None
+    reddit._oauth_token_cache["expires_at"] = 0.0
+    yield
+    reddit._oauth_token_cache["token"] = None
+    reddit._oauth_token_cache["expires_at"] = 0.0
+
+
+@pytest.mark.unit
+class TestOAuthToken:
+    def test_no_credentials_returns_none(self, monkeypatch):
+        monkeypatch.delenv("REDDIT_CLIENT_ID", raising=False)
+        monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
+        assert reddit._get_oauth_token() is None
+
+    def test_only_one_credential_set_returns_none(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
+        monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
+        assert reddit._get_oauth_token() is None
+
+    def test_fetches_and_returns_token(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
+        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
+        with patch.object(reddit, "urlopen", return_value=_token_resp("tok-1")) as op:
+            token = reddit._get_oauth_token()
+        assert token == "tok-1"
+        op.assert_called_once()
+
+    def test_second_call_uses_cache_not_a_new_request(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
+        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
+        with patch.object(reddit, "urlopen", return_value=_token_resp("tok-1")) as op:
+            first = reddit._get_oauth_token()
+            second = reddit._get_oauth_token()
+        assert first == second == "tok-1"
+        op.assert_called_once()
+
+    def test_expired_token_is_refetched(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
+        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
+        with patch.object(reddit, "urlopen", return_value=_token_resp("tok-1", expires_in=3600)):
+            reddit._get_oauth_token()
+        # Force the cached token to look expired.
+        reddit._oauth_token_cache["expires_at"] = time.time() - 1
+        with patch.object(reddit, "urlopen", return_value=_token_resp("tok-2")) as op:
+            token = reddit._get_oauth_token()
+        assert token == "tok-2"
+        op.assert_called_once()
+
+    def test_token_endpoint_failure_returns_none(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
+        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
+        with patch.object(reddit, "urlopen", side_effect=HTTPError("url", 401, "unauthorized", {}, None)):
+            assert reddit._get_oauth_token() is None
+
+    def test_malformed_token_response_returns_none(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
+        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
+        bad = _resp(lambda: b'{"no_access_token_here": true}')
+        with patch.object(reddit, "urlopen", return_value=bad):
+            assert reddit._get_oauth_token() is None
+
+    def test_uses_basic_auth_and_client_credentials_grant(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "myid")
+        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "mysecret")
+        seen = {}
+
+        def fake_urlopen(req, timeout=None):
+            seen["auth_header"] = req.headers.get("Authorization")
+            seen["body"] = req.data
+            seen["url"] = req.full_url
+            return _token_resp("tok-1")
+
+        with patch.object(reddit, "urlopen", side_effect=fake_urlopen):
+            reddit._get_oauth_token()
+        assert seen["url"] == reddit._TOKEN_URL
+        assert seen["auth_header"].startswith("Basic ")
+        assert b"grant_type=client_credentials" in seen["body"]
+
+
+@pytest.mark.unit
+class TestOAuthDispatch:
+    """_fetch_subreddit: OAuth-first when configured, RSS otherwise or on
+    OAuth failure — this is where the RSS-fallback contract now lives."""
+
+    def test_no_credentials_goes_straight_to_rss(self, monkeypatch):
+        monkeypatch.delenv("REDDIT_CLIENT_ID", raising=False)
+        monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
+        with patch.object(reddit, "_fetch_subreddit_json") as json_fetch, \
+             patch.object(reddit, "_fetch_subreddit_rss", return_value=[]) as rss:
+            reddit._fetch_subreddit("NVDA", "stocks", 5, 5.0)
+        json_fetch.assert_not_called()
+        rss.assert_called_once()
+
+    def test_oauth_success_skips_rss_entirely(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
+        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
+        oauth_posts = [{"title": "x", "score": 10, "num_comments": 2,
+                         "created_utc": 1700000000, "selftext": ""}]
+        with patch.object(reddit, "_get_oauth_token", return_value="tok"), \
+             patch.object(reddit, "_fetch_subreddit_json", return_value=oauth_posts) as json_fetch, \
+             patch.object(reddit, "_fetch_subreddit_rss") as rss:
+            out = reddit._fetch_subreddit("NVDA", "stocks", 5, 5.0)
+        json_fetch.assert_called_once()
+        rss.assert_not_called()
+        assert out == oauth_posts
+
+    def test_oauth_failure_falls_back_to_rss(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
+        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
+        rss_posts = [{"title": "y", "score": None, "num_comments": None,
+                      "created_utc": None, "selftext": "", "source": "rss"}]
+        with patch.object(reddit, "_get_oauth_token", return_value="tok"), \
+             patch.object(reddit, "_fetch_subreddit_json", return_value=None) as json_fetch, \
+             patch.object(reddit, "_fetch_subreddit_rss", return_value=rss_posts) as rss:
+            out = reddit._fetch_subreddit("NVDA", "stocks", 5, 5.0)
+        json_fetch.assert_called_once()
+        rss.assert_called_once()
+        assert out == rss_posts
