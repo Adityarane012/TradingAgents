@@ -203,6 +203,28 @@ TradingAgents works with any market Yahoo Finance covers, using the exchange-suf
 
 For `.NS`/`.BO` tickers, the sentiment analyst automatically routes to Indian subreddits and the news/market/fundamentals analysts get India-specific prompt guidance (India VIX, FRED's India macro series, currency/governance caveats) — no config needed. Optionally set `"data_vendors": {"news_data": "india_rss,yfinance"}` for Economic Times/Mint RSS macro news instead of Yahoo Finance search, which has thin Indian coverage.
 
+#### NSE market data for Indian tickers
+
+`.NS` tickers additionally get live NSE data pasted into two analysts' prompts, with no key and no setup:
+
+| Analyst | Data |
+|---|---|
+| News | FII/DII net institutional flows, India VIX, Nifty 50 level, Nifty put-call ratio, and the company's recent exchange announcements |
+| Fundamentals | Promoter/public shareholding across recent quarters, and corporate actions (dividends, bonuses, splits) |
+
+Promoter holding matters here because the alternative is wrong: yfinance's `heldPercentInsiders` reports 51.8% for Reliance against the 50.48% actually filed. Promoter *pledging* and the FII/DII split within public holding remain unavailable from any free source, and the prompt says so rather than inviting the model to guess.
+
+This data is read from NSE's public JSON endpoints, which are undocumented and can change. Guard rails: every figure carries its own as-of date; a snapshot dated after the analysis date is refused so a historical run cannot see post-decision data; values are sanity-checked (institutional net must equal buy minus sell, VIX within range, shareholding summing to 100%); and any failure appears in the prompt as an explicit `<... unavailable ...>` marker, never as a silent gap the model might read as "nothing happened".
+
+Check the sources against independent ones at any time:
+
+```bash
+python scripts/verify_india_sources.py                      # today, four large-caps
+python scripts/verify_india_sources.py --date 2026-09-18 --tickers RELIANCE.NS,TCS.NS
+```
+
+It cross-checks Nifty and India VIX against Yahoo Finance and exits non-zero if anything disagrees. Turn the whole feature off with `india_data_enabled: false`, `TRADINGAGENTS_INDIA_DATA_ENABLED=false`, or `--no-india-data` on the batch runner — worth doing if NSE blocks your network, since each blocked fetch costs a timeout first. `.BO`-only tickers are skipped: a BSE ticker's root is not assumed to name the same company on NSE.
+
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
 </p>
