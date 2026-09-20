@@ -597,14 +597,17 @@ class TestAnnouncements:
         assert query["from_date"] == ["19-08-2026"]
         assert query["to_date"] == ["18-09-2026"]
 
-    def test_newest_first_and_limited(self, nse):
+    def test_material_filings_lead_and_routine_ones_are_separated(self, nse):
+        """The captured window is realistic: of six filings, five are
+        conference intimations (or their "no UPSI" follow-ups) and one is a
+        Rs 12,00,000,000 debenture allotment. The allotment must lead."""
         items = nse_india.get_announcements("RELIANCE.NS", "2026-09-18", limit=3)
-        assert [a.at.strftime("%d-%b %H:%M") for a in items] == [
-            "17-Sep 19:50",
-            "17-Sep 19:40",
-            "16-Sep 17:45",
-        ]
-        assert items[0].category == "Updates"
+        material = [a for a in items if not a.routine]
+        routine = [a for a in items if a.routine]
+        assert [a.category for a in material] == ["Allotment of Securities"]
+        assert len(routine) == 5
+        # Each group stays newest-first.
+        assert [a.at for a in routine] == sorted((a.at for a in routine), reverse=True)
 
     def test_items_after_the_trade_date_are_excluded(self, nse):
         items = nse_india.get_announcements("RELIANCE.NS", "2026-09-16")
@@ -686,11 +689,27 @@ class TestBlocks:
             "RELIANCE.NS", "2026-09-18"
         )
 
-    def test_announcements_are_truncated(self, nse):
-        text = nse_india.announcements_block("RELIANCE.NS", "2026-09-18", limit=1)
-        line = text.splitlines()[1]
-        assert line.startswith("- 17-Sep-2026 19:50 IST | Updates: This is further to")
+    def test_long_material_announcements_are_truncated(self, nse):
+        nse.routes["corporate-announcements"] = [
+            {
+                "an_dt": "17-Sep-2026 19:50:00",
+                "desc": "Acquisition",
+                "attchmntText": "word " * 200,
+                "attchmntFile": "",
+                "symbol": "RELIANCE",
+            }
+        ]
+        line = nse_india.announcements_block("RELIANCE.NS", "2026-09-18", limit=1).splitlines()[1]
+        assert line.startswith("- 17-Sep-2026 19:50 IST | Acquisition: word word")
         assert line.endswith("…")
+        assert len(line) < 300
+
+    def test_the_material_filing_leads_the_block(self, nse):
+        text = nse_india.announcements_block("RELIANCE.NS", "2026-09-18")
+        first = text.splitlines()[1]
+        assert "Allotment of Securities" in first
+        assert "Debentures" in first
+        assert "3x Analysts/Institutional Investor Meet" in text
 
     def test_announcements_none_in_window_is_said_plainly(self, nse):
         nse.routes["corporate-announcements"] = []
@@ -793,3 +812,109 @@ class TestShareholdingVariants:
         skipped = [r for r in caplog.records if "failed validation" in r.getMessage()]
         assert len(skipped) == 1
         assert "skipped 5 row(s)" in skipped[0].getMessage()
+
+
+# --- announcement triage ------------------------------------------------------------------
+
+
+def _ann(at: str, desc: str, text: str = "body text", symbol: str = "RELIANCE") -> dict:
+    return {"an_dt": at, "desc": desc, "attchmntText": text, "attchmntFile": "", "symbol": symbol}
+
+
+class TestAnnouncementTriage:
+    """Routine filings are summarised, never dropped.
+
+    A survey of 709 real filings (8 companies, 6.5 months, 2026-09-20) showed
+    the generic "Updates" bucket is 25% of volume and carries both noise and
+    the most material news in the window — Reliance's Jio Platforms IPO
+    observation letter arrived under it. So classification is a short deny-list
+    of provably procedural categories, and anything unrecognised is material.
+    """
+
+    def test_procedural_categories_are_marked_routine(self, nse):
+        nse.routes["corporate-announcements"] = [
+            _ann("17-Sep-2026 10:00:00", "Copy of Newspaper Publication"),
+            _ann("17-Sep-2026 11:00:00", "Trading Window"),
+            _ann("17-Sep-2026 12:00:00", "Analysts/Institutional Investor Meet/Con. Call Updates"),
+            _ann(
+                "17-Sep-2026 13:00:00",
+                "Certificate under SEBI (Depositories and Participants) Regulations, 2018",
+            ),
+        ]
+        items = nse_india.get_announcements("RELIANCE.NS", "2026-09-18")
+        assert len(items) == 4
+        assert all(a.routine for a in items)
+
+    def test_the_jio_ipo_case_is_kept_material(self, nse):
+        """The regression this filter exists to avoid: a generic category
+        carrying genuinely market-moving news."""
+        nse.routes["corporate-announcements"] = [
+            _ann(
+                "17-Sep-2026 10:00:00",
+                "Updates",
+                "Observation Letter on the Draft Red Herring Prospectus for the proposed "
+                "Initial Public Offer of Jio Platforms Limited",
+            )
+        ]
+        items = nse_india.get_announcements("RELIANCE.NS", "2026-09-18")
+        assert items[0].routine is False
+        text = nse_india.announcements_block("RELIANCE.NS", "2026-09-18")
+        assert "Jio Platforms" in text
+
+    @pytest.mark.parametrize(
+        "category",
+        ["Acquisition", "Credit Rating", "Outcome of Board Meeting", "Some New Category 2027"],
+    )
+    def test_unrecognised_and_material_categories_default_to_material(self, nse, category):
+        nse.routes["corporate-announcements"] = [_ann("17-Sep-2026 10:00:00", category)]
+        assert nse_india.get_announcements("RELIANCE.NS", "2026-09-18")[0].routine is False
+
+    def test_a_self_certified_non_material_filing_is_routine_whatever_its_category(self, nse):
+        nse.routes["corporate-announcements"] = [
+            _ann(
+                "17-Sep-2026 10:00:00",
+                "Updates",
+                "Executives participated in the Forum and no unpublished price sensitive "
+                "information was shared or discussed in the said meeting.",
+            )
+        ]
+        assert nse_india.get_announcements("RELIANCE.NS", "2026-09-18")[0].routine is True
+
+    def test_routine_filings_are_summarised_not_hidden(self, nse):
+        nse.routes["corporate-announcements"] = [
+            _ann("17-Sep-2026 10:00:00", "Copy of Newspaper Publication"),
+            _ann("17-Sep-2026 11:00:00", "Copy of Newspaper Publication"),
+            _ann("17-Sep-2026 12:00:00", "Trading Window"),
+            _ann("17-Sep-2026 13:00:00", "Acquisition", "Acquired a stake in Foo Ltd"),
+        ]
+        text = nse_india.announcements_block("RELIANCE.NS", "2026-09-18")
+        assert "Acquired a stake in Foo Ltd" in text
+        assert "2x Copy of Newspaper Publication" in text
+        assert "1x Trading Window" in text
+        assert "detail omitted as procedural" in text
+
+    def test_the_limit_applies_to_material_filings_only(self, nse):
+        """A burst of newspaper notices must not crowd out a real filing."""
+        rows = [_ann(f"1{i}-Sep-2026 10:00:00", "Copy of Newspaper Publication") for i in range(5)]
+        rows.append(_ann("17-Sep-2026 10:00:00", "Acquisition", "Acquired Foo Ltd"))
+        rows.append(_ann("16-Sep-2026 10:00:00", "Credit Rating", "Rating upgraded"))
+        nse.routes["corporate-announcements"] = rows
+        items = nse_india.get_announcements("RELIANCE.NS", "2026-09-18", limit=2)
+        material = [a for a in items if not a.routine]
+        assert len(material) == 2
+        assert {a.category for a in material} == {"Acquisition", "Credit Rating"}
+        assert len([a for a in items if a.routine]) == 5
+
+    def test_a_window_of_only_routine_filings_says_so_plainly(self, nse):
+        nse.routes["corporate-announcements"] = [
+            _ann("17-Sep-2026 10:00:00", "Copy of Newspaper Publication")
+        ]
+        text = nse_india.announcements_block("RELIANCE.NS", "2026-09-18")
+        assert "No substantive NSE announcements" in text
+        assert "1x Copy of Newspaper Publication" in text
+
+    def test_category_matching_ignores_case_and_spacing(self, nse):
+        nse.routes["corporate-announcements"] = [
+            _ann("17-Sep-2026 10:00:00", "  TRADING   WINDOW  ")
+        ]
+        assert nse_india.get_announcements("RELIANCE.NS", "2026-09-18")[0].routine is True

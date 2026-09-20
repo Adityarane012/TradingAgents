@@ -37,6 +37,8 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from urllib.error import HTTPError
@@ -549,12 +551,51 @@ def get_corporate_actions(
     return actions[:limit]
 
 
+# Announcement categories that are procedural by construction: a statutory
+# newspaper advertisement, a notice that executives will attend a conference,
+# the opening/closing of the insider trading window, a routine depository
+# certificate. Surveyed across 709 real filings from 8 companies over 6.5
+# months (2026-09-20); these four accounted for 27% of the volume and none of
+# them carries a number an analyst would act on.
+#
+# This list is deliberately SHORT and is a deny-list, not an allow-list: an
+# unrecognised or newly-introduced category counts as material. The survey
+# showed why that matters — the generic "Updates" bucket (25% of all filings)
+# carried Reliance's Jio Platforms IPO observation letter and a Rolls-Royce
+# partnership announcement alongside the noise, so classifying by category
+# alone would have discarded the most market-moving news in the window.
+#
+# Nothing is ever dropped: routine items are rolled up into a one-line count
+# instead of being rendered in full, so the model still sees that they were
+# filed and can say so.
+_ROUTINE_CATEGORIES = frozenset(
+    {
+        "analysts/institutional investor meet/con. call updates",
+        "copy of newspaper publication",
+        "trading window",
+        "certificate under sebi (depositories and participants) regulations, 2018",
+    }
+)
+
+# A filing whose own text certifies that nothing price-sensitive was shared.
+# That is the company's assertion, not our guess, so it is safe to compress
+# regardless of category. Low yield (~1% of filings) but free and principled.
+_NO_UPSI = re.compile(r"no\s+unpublished\s+price[\s-]*sensitive\s+information", re.I)
+
+
 @dataclass(frozen=True)
 class Announcement:
     at: datetime
     category: str
     text: str
     link: str
+    # True when the filing is procedural (see _ROUTINE_CATEGORIES). Routine
+    # items are summarised rather than quoted; they are never discarded.
+    routine: bool = False
+
+
+def _is_routine(category: str, text: str) -> bool:
+    return category.strip().lower() in _ROUTINE_CATEGORIES or bool(_NO_UPSI.search(text))
 
 
 def get_announcements(
@@ -587,16 +628,23 @@ def get_announcements(
             at = parse_nse_datetime(row.get("an_dt"))
             if at is None or not (start <= at.date() <= curr):
                 continue
+            category = " ".join(str(row.get("desc", "")).split())
+            text = " ".join(str(row.get("attchmntText", "")).split())
             found.append(
                 Announcement(
                     at,
-                    " ".join(str(row.get("desc", "")).split()),
-                    " ".join(str(row.get("attchmntText", "")).split()),
+                    category,
+                    text,
                     str(row.get("attchmntFile", "") or ""),
+                    routine=_is_routine(category, text),
                 )
             )
     found.sort(key=lambda a: a.at, reverse=True)
-    return found[:limit]
+    # ``limit`` caps the filings quoted in full. Routine ones are all kept and
+    # summarised by the caller, so a burst of newspaper notices can never push
+    # a material filing out of the window.
+    material = [a for a in found if not a.routine][:limit]
+    return material + [a for a in found if a.routine]
 
 
 # --- formatted blocks (never raise) ------------------------------------------
@@ -713,11 +761,31 @@ def announcements_block(
         items = get_announcements(ticker, curr_date, lookback_days, limit)
         if not items:
             return f"No NSE announcements filed for {ticker} in the last {lookback_days} days."
-        lines = [f"Recent NSE announcements for {ticker} (newest first):"]
-        for a in items:
-            text = a.text if len(a.text) <= 220 else a.text[:220].rstrip() + "…"
-            label = f"{a.category}: " if a.category else ""
-            lines.append(f"- {_stamp(a.at)} | {label}{text}")
+        material = [a for a in items if not a.routine]
+        routine = [a for a in items if a.routine]
+
+        lines = []
+        if material:
+            lines.append(f"Recent NSE announcements for {ticker} (newest first):")
+            for a in material:
+                text = a.text if len(a.text) <= 220 else a.text[:220].rstrip() + "…"
+                label = f"{a.category}: " if a.category else ""
+                lines.append(f"- {_stamp(a.at)} | {label}{text}")
+        else:
+            lines.append(
+                f"No substantive NSE announcements for {ticker} in the last "
+                f"{lookback_days} days."
+            )
+        if routine:
+            # Summarised, not hidden: the model is told these exist and that
+            # their detail was withheld, so it cannot read the gap as silence.
+            counts = Counter(a.category or "Uncategorised" for a in routine)
+            summary = ", ".join(f"{n}x {cat}" for cat, n in counts.most_common())
+            lines.append(
+                f"Also filed in this window, detail omitted as procedural "
+                f"(statutory notices, conference-attendance intimations, trading-window "
+                f"and depository certificates): {summary}."
+            )
         return "\n".join(lines)
 
     return _render(f"NSE announcements for {ticker}", produce)

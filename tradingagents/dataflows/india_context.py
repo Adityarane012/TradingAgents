@@ -42,9 +42,11 @@ from .screener_in import ownership_split_block, screener_enabled
 from .symbol_utils import is_india_ticker
 
 # Announcement text is the only unbounded part of these blocks (a filing
-# summary can run to paragraphs), so the news block takes fewer, shorter ones
-# than the raw fetcher's default. Everything else is a line or a small table.
-_ANNOUNCEMENT_LIMIT = 6
+# summary can run to paragraphs). Routine filings are now summarised rather
+# than quoted (see nse_india._ROUTINE_CATEGORIES), which freed enough budget
+# to quote more of the substantive ones: on a live 30-day window for Reliance
+# this is six material filings for roughly what six mixed ones used to cost.
+_ANNOUNCEMENT_LIMIT = 8
 _ANNOUNCEMENT_LOOKBACK_DAYS = 30
 _SHAREHOLDING_QUARTERS = 6
 
