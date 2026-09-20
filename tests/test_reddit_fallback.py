@@ -1,11 +1,9 @@
-"""Tests for the RSS-first Reddit fetcher, its 429 backoff, the opt-in JSON
-path's degradation (#862), and chunked-transfer error handling (#1024)."""
+"""Tests for the Reddit RSS fetcher: one combined request, its 429 backoff, and
+chunked-transfer error handling (#1024)."""
 
 from __future__ import annotations
 
 import http.client
-import json
-import time
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -82,48 +80,13 @@ class TestRssParsing:
             posts = reddit._fetch_subreddit_rss("NVDA", "stocks", limit=5, timeout=5.0)
         assert len(posts) == 2
         assert posts[0]["title"] == "NVDA earnings beat, stock pops"
-        assert posts[0]["source"] == "rss"
-        assert posts[0]["score"] is None
-        assert posts[0]["num_comments"] is None
         assert posts[0]["created_utc"] > 0
         assert "datacenter unit" in posts[0]["selftext"]
+        assert posts[0]["subreddit"] == "stocks"
 
     def test_malformed_xml_reports_unavailable(self):
         with patch.object(reddit, "urlopen", return_value=_resp(lambda: b"<<not xml>>")):
             assert reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0) is None
-
-
-@pytest.mark.unit
-class TestFetchSubredditIsRssFirst:
-    """Without OAuth credentials, the per-subreddit fetch goes straight to
-    RSS — it must not hit the WAF-blocked JSON endpoint, which only burned
-    rate-limit budget (issue #862). See TestOAuthDispatch for the
-    credentials-configured half of this behavior."""
-
-    def test_delegates_to_rss_without_touching_json(self, monkeypatch):
-        monkeypatch.delenv("REDDIT_CLIENT_ID", raising=False)
-        monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
-        sentinel = [{"title": "x", "source": "rss", "score": None,
-                     "num_comments": None, "created_utc": None, "selftext": ""}]
-        with patch.object(reddit, "_fetch_subreddit_rss", return_value=sentinel) as rss, \
-             patch.object(reddit, "urlopen",
-                          side_effect=AssertionError("JSON endpoint must not be called")):
-            out = reddit._fetch_subreddit("NVDA", "stocks", 5, 5.0)
-        rss.assert_called_once()
-        assert out is sentinel
-
-
-@pytest.mark.unit
-class TestJsonPathFallsBackToRss:
-    """The OAuth JSON path reports failure as None; _fetch_subreddit (the
-    dispatcher, not _fetch_subreddit_json itself) is what falls back to RSS
-    — see TestOAuthDispatch below for that half of the contract."""
-
-    def test_403_returns_none(self):
-        err = HTTPError("url", 403, "Blocked", {}, None)
-        with patch.object(reddit, "urlopen", side_effect=err):
-            out = reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0, token="tok")
-        assert out is None
 
 
 @pytest.mark.unit
@@ -182,11 +145,6 @@ class TestChunkedTransferErrorsHandled:
         with patch.object(reddit, "urlopen", return_value=_raise(http.client.IncompleteRead(b""))):
             assert reddit._fetch_subreddit_rss("NVDA", "stocks", 5, 5.0) is None
 
-    def test_json_incomplete_read_returns_none(self):
-        with patch.object(reddit, "urlopen", return_value=_raise(http.client.IncompleteRead(b""))):
-            out = reddit._fetch_subreddit_json("NVDA", "stocks", 5, 5.0, token="tok")
-        assert out is None
-
     def test_oversized_rss_feed_is_refused_not_parsed(self):
         # A hostile/misbehaving endpoint streaming an unbounded body must not be
         # read into memory before parsing; overflow degrades to an empty feed.
@@ -204,24 +162,11 @@ class TestFormatterHandlesRssPosts:
             "created_utc": reddit._iso_to_timestamp("2026-05-20T14:30:00Z"),
             "selftext": "great quarter", "source": "rss",
         }]
-        with patch.object(reddit, "_fetch_subreddit", return_value=rss_posts):
-            out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks",), inter_request_delay=0)
-        assert "via RSS feed" in out
-        assert "↑" not in out  # no fake score arrow
+        with patch.object(reddit, "_fetch_subreddit_rss", return_value=rss_posts):
+            out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks",))
+        assert "↑" not in out  # RSS has no scores; none are invented
         assert "NVDA pops" in out
         assert "great quarter" in out
-
-    def test_json_posts_still_show_counts(self):
-        json_posts = [{
-            "title": "NVDA pops", "score": 1234, "num_comments": 56,
-            "created_utc": reddit._iso_to_timestamp("2026-05-20T14:30:00Z"),
-            "selftext": "",
-        }]
-        with patch.object(reddit, "_fetch_subreddit", return_value=json_posts):
-            out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks",), inter_request_delay=0)
-        assert "1234↑" in out
-        assert "56c" in out
-        assert "via RSS" not in out
 
 
 @pytest.mark.unit
@@ -231,12 +176,12 @@ class TestCryptoSearchTerm:
     def _captured_ticker(self, ticker):
         seen = {}
 
-        def fake_fetch(t, sub, limit, timeout, **kwargs):
+        def fake_fetch(t, subs, limit, timeout, **kwargs):
             seen["ticker"] = t
             return []
 
-        with patch.object(reddit, "_fetch_subreddit", side_effect=fake_fetch):
-            reddit.fetch_reddit_posts(ticker, subreddits=("stocks",), inter_request_delay=0)
+        with patch.object(reddit, "_fetch_subreddit_rss", side_effect=fake_fetch):
+            reddit.fetch_reddit_posts(ticker, subreddits=("stocks",))
         return seen["ticker"]
 
     def test_crypto_pair_searches_base(self):
@@ -247,371 +192,83 @@ class TestCryptoSearchTerm:
 
 
 @pytest.mark.unit
-class TestFailedFetchIsNotSilence:
-    """A throttled fetch must not be rendered as "no posts found" (#1295).
+class TestOneRequestForAllSubreddits:
+    """Reddit's anonymous RSS allows about one request per minute per IP, so a
+    request per subreddit spent a back-off on nearly every run. One combined
+    feed (``r/a+b+c``) carries each entry's subreddit, so nothing is lost."""
 
-    Returning [] for both a failed request and a genuinely empty search made the
-    sentiment analyst read rate limiting as real silence ("r/stocks and
-    r/investing are silent"), which is a signal that was never observed.
-    """
+    def _post(self, sub, title="NVDA pops"):
+        return {"title": title, "score": None, "num_comments": None,
+                "created_utc": reddit._iso_to_timestamp("2026-05-20T14:30:00Z"),
+                "selftext": "", "source": "rss", "subreddit": sub}
 
-    _POST = {
-        "title": "NVDA pops", "score": None, "num_comments": None,
-        "created_utc": reddit._iso_to_timestamp("2026-05-20T14:30:00Z"),
-        "selftext": "", "source": "rss",
-    }
+    def test_all_subreddits_share_one_request(self):
+        calls = []
 
-    def _run(self, results):
-        """Drive fetch_reddit_posts with a per-subreddit result sequence."""
-        subs = tuple(f"s{i}" for i in range(len(results)))
-        with patch.object(reddit, "_fetch_subreddit", side_effect=list(results)):
-            return reddit.fetch_reddit_posts(
-                "NVDA", subreddits=subs, inter_request_delay=0
-            )
+        def record(t, subs, limit, timeout):
+            calls.append((subs, limit))
+            return []
 
-    def test_failed_subreddit_is_marked_unavailable_not_empty(self):
-        out = self._run([None, [self._POST]])
-        assert "unavailable" in out
-        assert "no posts found" not in out.split("unavailable")[0]
+        with patch.object(reddit, "_fetch_subreddit_rss", side_effect=record):
+            reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b", "c"), limit_per_sub=5)
+        # One full page, so a busy subreddit cannot crowd the others out.
+        assert calls == [("a+b+c", reddit._FEED_PAGE)]
 
-    def test_all_sources_failing_does_not_claim_no_posts(self):
-        out = self._run([None, None])
+    def test_posts_are_grouped_back_by_subreddit(self):
+        posts = [self._post("b", "FROM B"), self._post("a", "FROM A")]
+        with patch.object(reddit, "_fetch_subreddit_rss", return_value=posts):
+            out = reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b"))
+        assert out.index("r/a") < out.index("FROM A") < out.index("r/b") < out.index("FROM B")
+
+    def test_failed_request_is_unavailable_not_silence(self):
+        # #1295: a throttled fetch must not read as "no posts found".
+        with patch.object(reddit, "_fetch_subreddit_rss", return_value=None):
+            out = reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b"))
         assert "Reddit unavailable" in out
         assert "no Reddit posts found" not in out
 
-    def test_mixed_failure_and_empty_only_claims_silence_for_searched_subs(self):
-        # s0 failed, s1 genuinely returned nothing: the "no posts" claim must
-        # cover only s1, with s0 reported separately as unavailable.
-        out = self._run([None, []])
-        assert "r/s1" in out.split("unavailable (fetch failed)")[0]
-        assert "unavailable (fetch failed): r/s0" in out
-
     def test_genuine_empty_still_reports_no_posts(self):
-        out = self._run([[], []])
+        with patch.object(reddit, "_fetch_subreddit_rss", return_value=[]):
+            out = reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b"))
         assert "no Reddit posts found" in out
         assert "unavailable" not in out
 
-    def test_retry_is_not_spent_again_after_a_failure(self):
-        # The 60s back-off must be paid at most once per run, so subsequent
-        # subreddits are fetched with retry disabled rather than stalling.
-        seen = []
-
-        def record(t, sub, limit, timeout, _retry=True):
-            seen.append(_retry)
-            return None
-
-        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
-            reddit.fetch_reddit_posts(
-                "NVDA", subreddits=("a", "b", "c"), inter_request_delay=0
-            )
-        assert seen == [True, False, False]
+    def test_subreddit_with_no_posts_is_listed_when_others_have_some(self):
+        with patch.object(reddit, "_fetch_subreddit_rss", return_value=[self._post("a")]):
+            out = reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b"))
+        assert "r/b: <no posts found" in out
 
 
 @pytest.mark.unit
-class TestIndiaRegionalRouting:
-    """.NS/.BO tickers auto-route to Indian subreddits with the suffix
-    stripped from the search term (#1346) — wallstreetbets/stocks/investing
-    return nothing for NSE/BSE names, and nobody searches "RELIANCE.NS"."""
+def test_posts_from_an_unrequested_or_unnamed_subreddit_are_not_dropped():
+    posts = [
+        {"title": "ELSEWHERE", "created_utc": None, "selftext": "", "subreddit": "options"},
+        {"title": "NO LABEL", "created_utc": None, "selftext": "", "subreddit": ""},
+    ]
+    with patch.object(reddit, "_fetch_subreddit_rss", return_value=posts):
+        out = reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b"))
+    assert "ELSEWHERE" in out and "r/options" in out
+    assert "NO LABEL" in out
 
-    def test_india_ticker_uses_india_subreddits_by_default(self):
-        seen_subs = []
-
-        def record(t, sub, limit, timeout, _retry=True):
-            seen_subs.append(sub)
-            return []
-
-        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
-            reddit.fetch_reddit_posts("RELIANCE.NS", inter_request_delay=0)
-        assert tuple(seen_subs) == reddit.INDIA_SUBREDDITS
-
-    def test_us_ticker_still_uses_default_subreddits(self):
-        seen_subs = []
-
-        def record(t, sub, limit, timeout, _retry=True):
-            seen_subs.append(sub)
-            return []
-
-        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
-            reddit.fetch_reddit_posts("AAPL", inter_request_delay=0)
-        assert tuple(seen_subs) == reddit.DEFAULT_SUBREDDITS
-
-    def test_explicit_subreddits_override_india_auto_selection(self):
-        seen_subs = []
-
-        def record(t, sub, limit, timeout, _retry=True):
-            seen_subs.append(sub)
-            return []
-
-        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
-            reddit.fetch_reddit_posts(
-                "RELIANCE.NS", subreddits=("stocks",), inter_request_delay=0
-            )
-        assert seen_subs == ["stocks"]
-
-    def test_india_suffix_stripped_from_search_term(self):
-        seen_tickers = []
-
-        def record(t, sub, limit, timeout, _retry=True):
-            seen_tickers.append(t)
-            return []
-
-        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
-            reddit.fetch_reddit_posts("HDFCBANK.BO", inter_request_delay=0)
-        assert seen_tickers == ["HDFCBANK"] * len(reddit.INDIA_SUBREDDITS)
-
-    def test_non_india_ticker_search_term_unchanged(self):
-        seen_tickers = []
-
-        def record(t, sub, limit, timeout, _retry=True):
-            seen_tickers.append(t)
-            return []
-
-        with patch.object(reddit, "_fetch_subreddit", side_effect=record):
-            reddit.fetch_reddit_posts("AAPL", inter_request_delay=0)
-        assert seen_tickers == ["AAPL"] * len(reddit.DEFAULT_SUBREDDITS)
-
-
-# ── OAuth token caching + dispatch (#1352) ───────────────────────────
-
-def _token_resp(access_token="tok-abc", expires_in=3600):
-    body = json.dumps({"access_token": access_token, "expires_in": expires_in}).encode()
-    return _resp(lambda: body)
-
-
-@pytest.fixture(autouse=True)
-def _reset_oauth_cache():
-    """The token cache is module-level state — must not leak between tests."""
-    reddit._oauth_token_cache["token"] = None
-    reddit._oauth_token_cache["expires_at"] = 0.0
-    yield
-    reddit._oauth_token_cache["token"] = None
-    reddit._oauth_token_cache["expires_at"] = 0.0
 
 
 @pytest.mark.unit
-class TestOAuthToken:
-    def test_no_credentials_returns_none(self, monkeypatch):
-        monkeypatch.delenv("REDDIT_CLIENT_ID", raising=False)
-        monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
-        assert reddit._get_oauth_token() is None
-
-    def test_only_one_credential_set_returns_none(self, monkeypatch):
-        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
-        monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
-        assert reddit._get_oauth_token() is None
-
-    def test_fetches_and_returns_token(self, monkeypatch):
-        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
-        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
-        with patch.object(reddit, "urlopen", return_value=_token_resp("tok-1")) as op:
-            token = reddit._get_oauth_token()
-        assert token == "tok-1"
-        op.assert_called_once()
-
-    def test_second_call_uses_cache_not_a_new_request(self, monkeypatch):
-        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
-        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
-        with patch.object(reddit, "urlopen", return_value=_token_resp("tok-1")) as op:
-            first = reddit._get_oauth_token()
-            second = reddit._get_oauth_token()
-        assert first == second == "tok-1"
-        op.assert_called_once()
-
-    def test_expired_token_is_refetched(self, monkeypatch):
-        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
-        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
-        with patch.object(reddit, "urlopen", return_value=_token_resp("tok-1", expires_in=3600)):
-            reddit._get_oauth_token()
-        # Force the cached token to look expired.
-        reddit._oauth_token_cache["expires_at"] = time.time() - 1
-        with patch.object(reddit, "urlopen", return_value=_token_resp("tok-2")) as op:
-            token = reddit._get_oauth_token()
-        assert token == "tok-2"
-        op.assert_called_once()
-
-    def test_token_endpoint_failure_returns_none(self, monkeypatch):
-        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
-        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
-        with patch.object(reddit, "urlopen", side_effect=HTTPError("url", 401, "unauthorized", {}, None)):
-            assert reddit._get_oauth_token() is None
-
-    def test_malformed_token_response_returns_none(self, monkeypatch):
-        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
-        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
-        bad = _resp(lambda: b'{"no_access_token_here": true}')
-        with patch.object(reddit, "urlopen", return_value=bad):
-            assert reddit._get_oauth_token() is None
-
-    def test_uses_basic_auth_and_client_credentials_grant(self, monkeypatch):
-        monkeypatch.setenv("REDDIT_CLIENT_ID", "myid")
-        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "mysecret")
-        seen = {}
-
-        def fake_urlopen(req, timeout=None):
-            seen["auth_header"] = req.headers.get("Authorization")
-            seen["body"] = req.data
-            seen["url"] = req.full_url
-            return _token_resp("tok-1")
-
-        with patch.object(reddit, "urlopen", side_effect=fake_urlopen):
-            reddit._get_oauth_token()
-        assert seen["url"] == reddit._TOKEN_URL
-        assert seen["auth_header"].startswith("Basic ")
-        assert b"grant_type=client_credentials" in seen["body"]
+def test_each_subreddit_keeps_its_own_quota():
+    busy = [{"title": f"A{i}", "created_utc": None, "selftext": "", "subreddit": "a"} for i in range(9)]
+    quiet = [{"title": "B0", "created_utc": None, "selftext": "", "subreddit": "b"}]
+    with patch.object(reddit, "_fetch_subreddit_rss", return_value=busy + quiet):
+        out = reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b"), limit_per_sub=3)
+    assert "A0" in out and "A2" in out and "A3" not in out  # capped per subreddit
+    assert "B0" in out                                        # not crowded out
 
 
 @pytest.mark.unit
-class TestOAuthDispatch:
-    """_fetch_subreddit: OAuth-first when configured, RSS otherwise or on
-    OAuth failure — this is where the RSS-fallback contract now lives."""
-
-    def test_no_credentials_goes_straight_to_rss(self, monkeypatch):
-        monkeypatch.delenv("REDDIT_CLIENT_ID", raising=False)
-        monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
-        with patch.object(reddit, "_fetch_subreddit_json") as json_fetch, \
-             patch.object(reddit, "_fetch_subreddit_rss", return_value=[]) as rss:
-            reddit._fetch_subreddit("NVDA", "stocks", 5, 5.0)
-        json_fetch.assert_not_called()
-        rss.assert_called_once()
-
-    def test_oauth_success_skips_rss_entirely(self, monkeypatch):
-        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
-        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
-        oauth_posts = [{"title": "x", "score": 10, "num_comments": 2,
-                         "created_utc": 1700000000, "selftext": ""}]
-        with patch.object(reddit, "_get_oauth_token", return_value="tok"), \
-             patch.object(reddit, "_fetch_subreddit_json", return_value=oauth_posts) as json_fetch, \
-             patch.object(reddit, "_fetch_subreddit_rss") as rss:
-            out = reddit._fetch_subreddit("NVDA", "stocks", 5, 5.0)
-        json_fetch.assert_called_once()
-        rss.assert_not_called()
-        assert out == oauth_posts
-
-    def test_oauth_failure_falls_back_to_rss(self, monkeypatch):
-        monkeypatch.setenv("REDDIT_CLIENT_ID", "id")
-        monkeypatch.setenv("REDDIT_CLIENT_SECRET", "secret")
-        rss_posts = [{"title": "y", "score": None, "num_comments": None,
-                      "created_utc": None, "selftext": "", "source": "rss"}]
-        with patch.object(reddit, "_get_oauth_token", return_value="tok"), \
-             patch.object(reddit, "_fetch_subreddit_json", return_value=None) as json_fetch, \
-             patch.object(reddit, "_fetch_subreddit_rss", return_value=rss_posts) as rss:
-            out = reddit._fetch_subreddit("NVDA", "stocks", 5, 5.0)
-        json_fetch.assert_called_once()
-        rss.assert_called_once()
-        assert out == rss_posts
-
-
-class _Hdrs(dict):
-    """Case-insensitive header mapping, like http.client's."""
-
-    def get(self, key, default=None):
-        return super().get(key.lower(), default)
-
-
-def _resp_with(headers: dict, body: bytes = b"<feed/>"):
-    class _R:
-        def __init__(self):
-            self.headers = _Hdrs({k.lower(): v for k, v in headers.items()})
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self, size=-1):
-            return body
-
-    return _R()
-
-
-class TestRateLimitHeaders:
-    """Reddit states its per-IP budget on every response, including 429s.
-
-    Measured 2026-09-20: one request exhausts the window (remaining 0.0) and
-    x-ratelimit-reset counts down ~12-60s. The 429 carries NO Retry-After but
-    DOES carry x-ratelimit-reset, so the old blind 60s fallback waited far
-    longer than Reddit actually asked for.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _clean(self):
-        reddit._RATE_LIMIT.reset()
-        yield
-        reddit._RATE_LIMIT.reset()
-
-    def test_a_spent_budget_makes_the_next_call_wait(self):
-        reddit._RATE_LIMIT.observe(
-            _Hdrs({"x-ratelimit-remaining": "0.0", "x-ratelimit-reset": "12"})
-        )
-        assert reddit._RATE_LIMIT.seconds_until_slot() > 10
-
-    def test_remaining_budget_means_no_wait(self):
-        reddit._RATE_LIMIT.observe(
-            _Hdrs({"x-ratelimit-remaining": "5", "x-ratelimit-reset": "30"})
-        )
-        assert reddit._RATE_LIMIT.seconds_until_slot() == 0.0
-
-    @pytest.mark.parametrize(
-        "headers",
-        [
-            {"x-ratelimit-remaining": "lots", "x-ratelimit-reset": "soon"},
-            {},
-            None,
-        ],
-    )
-    def test_missing_or_unparseable_headers_are_ignored(self, headers):
-        reddit._RATE_LIMIT.observe(_Hdrs(headers) if headers is not None else None)
-        assert reddit._RATE_LIMIT.seconds_until_slot() == 0.0
-
-    def test_wait_is_skipped_when_it_would_exceed_the_cap(self):
-        reddit._RATE_LIMIT.observe(
-            _Hdrs({"x-ratelimit-remaining": "0", "x-ratelimit-reset": "600"})
-        )
-        slept = []
-        with patch.object(reddit.time, "sleep", slept.append):
-            assert reddit._RATE_LIMIT.wait_for_slot(max_wait=75) is False
-        assert slept == []
-
-    def test_wait_happens_when_within_the_cap(self):
-        reddit._RATE_LIMIT.observe(
-            _Hdrs({"x-ratelimit-remaining": "0", "x-ratelimit-reset": "12"})
-        )
-        slept = []
-        with patch.object(reddit.time, "sleep", slept.append):
-            assert reddit._RATE_LIMIT.wait_for_slot(max_wait=75) is True
-        assert len(slept) == 1 and slept[0] > 10
-
-    def test_429_uses_the_reset_header_not_the_blind_fallback(self):
-        """The bug this fixes: no Retry-After, so the old code slept 60s while
-        the response itself said 12."""
-        exc = HTTPError("u", 429, "t", _Hdrs({"x-ratelimit-reset": "12"}), None)
-        assert reddit._retry_after_seconds(exc) is None
-        assert reddit._reset_after_seconds(exc) == 12.0
-
-    def test_retry_after_still_wins_when_present(self):
-        exc = HTTPError(
-            "u", 429, "t", _Hdrs({"retry-after": "5", "x-ratelimit-reset": "40"}), None
-        )
-        assert reddit._retry_after_seconds(exc) == 5.0
-
-    def test_a_spent_budget_skips_the_request_entirely(self):
-        reddit._RATE_LIMIT.observe(
-            _Hdrs({"x-ratelimit-remaining": "0", "x-ratelimit-reset": "600"})
-        )
-        called = []
-
-        def _urlopen(*a, **k):
-            called.append(1)
-            raise AssertionError("should not have been called")
-
-        with patch.object(reddit, "urlopen", _urlopen):
-            result = reddit._fetch_subreddit_rss("TCS", "stocks", 5, 10.0)
-        assert result is None  # unavailable, not "no posts found"
-        assert called == []
-
-    def test_a_successful_response_updates_the_budget(self):
-        resp = _resp_with({"x-ratelimit-remaining": "0.0", "x-ratelimit-reset": "30"})
-        with patch.object(reddit, "urlopen", lambda *a, **k: resp):
-            reddit._fetch_subreddit_rss("TCS", "stocks", 5, 10.0)
-        assert reddit._RATE_LIMIT.seconds_until_slot() > 25
+def test_empty_subreddit_on_a_full_page_is_not_called_empty():
+    # A full page may have cut a quieter subreddit's posts off, so its absence
+    # from the page is not evidence of no posts.
+    full = [{"title": f"A{i}", "created_utc": None, "selftext": "", "subreddit": "a"}
+            for i in range(reddit._FEED_PAGE)]
+    with patch.object(reddit, "_fetch_subreddit_rss", return_value=full):
+        out = reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b"))
+    assert "r/b: <no posts found" not in out
+    assert f"newest {reddit._FEED_PAGE}" in out

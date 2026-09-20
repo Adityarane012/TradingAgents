@@ -1,57 +1,35 @@
 """Reddit search fetcher for ticker-specific discussion posts.
 
-Default path (no credentials configured) is Reddit's public Atom/RSS search
-feed (``reddit.com/r/{sub}/search.rss``). The richer JSON search endpoint
-(``/search.json``) is reliably WAF-blocked (``HTTP 403``) for anonymous
-clients (issue #862), and probing it on every call only doubled our request
-volume against Reddit's per-IP rate limit — tripping ``429`` on the RSS
-fallback — so it was kept (``_fetch_subreddit_json``) but not used by
-default. On a 429 the RSS path backs off once (honouring ``Retry-After``).
-RSS also lacks score / comment counts, so those posts are marked and the
-formatter omits the metrics rather than printing fake zeros.
-
-Optional OAuth path (set ``REDDIT_CLIENT_ID`` + ``REDDIT_CLIENT_SECRET``,
-#1352): a Reddit "script" app (reddit.com/prefs/apps; Reddit may require
-approval via its Data Access Request form to create one) gets a
-``client_credentials`` token and switches every fetch to the
-JSON search endpoint via ``oauth.reddit.com``. This is the actual fix for
-the RSS path's rate-limit backoffs, not a band-aid on top of them — an OAuth
-client has its own per-client budget instead of sharing the anonymous
-per-IP pool that got hit repeatedly in a multi-ticker batch run, and JSON
-carries real score/comment counts RSS cannot. Falls back to the RSS path on
-any OAuth failure (bad credentials, token-endpoint error, ...) rather than
-raising, so a misconfigured or revoked app degrades instead of breaking the
-run.
+Reads Reddit's public Atom/RSS search feed, searching all subreddits in one
+combined request. The JSON search endpoint is WAF-blocked (``HTTP 403``) for
+anonymous clients (#862), so RSS is the only path; it carries no score or comment
+counts. On a 429 we back off once, honouring ``Retry-After``.
 
 A fetch that fails is reported as ``<unavailable>``, never as "no posts found":
 the two are different claims, and passing a rate-limited fetch off as silence
 hands the sentiment analyst a signal that was never observed (#1295).
 
-No API key required for the default path. Returns formatted plaintext blocks
-ready for prompt injection and degrades gracefully — returns a placeholder
-string rather than raising, so callers never special-case missing data.
+No API key required. Returns formatted plaintext blocks ready for prompt
+injection and degrades gracefully — returns a placeholder string rather than
+raising, so callers never special-case missing data.
 """
 
 from __future__ import annotations
 
-import base64
 import html
 import http.client
-import json
 import logging
-import os
 import random
 import re
-import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .date_window import in_window
+from .date_window import coverage_gap, in_window
 from .symbol_utils import crypto_base, is_india_ticker, strip_india_suffix
 
 logger = logging.getLogger(__name__)
@@ -67,17 +45,26 @@ def _within_window(posts, start_date, end_date):
         return posts
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-    kept = []
-    for p in posts:
-        ts = p.get("created_utc")
-        created = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
-        if in_window(created, start_dt, end_dt):
-            kept.append(p)
-    return kept
+    return [p for p in posts if in_window(_posted_at(p), start_dt, end_dt)]
 
-_API = "https://oauth.reddit.com/r/{sub}/search?{qs}"
+
+def _posted_at(post) -> datetime | None:
+    """A post's ``created_utc`` epoch as a UTC datetime, or None when missing."""
+    ts = post.get("created_utc")
+    return datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
+
+
+def _coverage_dates(posts) -> list:
+    """Dates that bound the feed's coverage. The search is limited to the last
+    week (``t=week``), so the lookback start bounds it even when nothing came
+    back; a full page may have cut older matches off, so then only the posts
+    themselves do."""
+    dates = [_posted_at(p) for p in posts]
+    if len(posts) < _FEED_PAGE:
+        dates.append(datetime.now(timezone.utc) - _SEARCH_LOOKBACK)
+    return dates
+
 _RSS = "https://www.reddit.com/r/{sub}/search.rss?{qs}"
-_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 # A descriptive, identified User-Agent (per Reddit's API etiquette). Reddit
 # blocks generic/anonymous tokens like bare "Mozilla/5.0" or "curl/…" but
 # serves this one on both endpoints; the RSS feed accepts it even when the
@@ -90,89 +77,30 @@ _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 # investing trend more measured. Caller can override.
 DEFAULT_SUBREDDITS = ("wallstreetbets", "stocks", "investing")
 
-# Indian retail/investing subreddits, used automatically for .NS/.BO/.NSE/.BSE
-# tickers when the caller does not pass an explicit `subreddits` override.
-# wallstreetbets/stocks/investing return essentially nothing for NSE/BSE
-# names (they're US-market communities), so the sentiment analyst otherwise
-# always sees an empty Reddit block and defaults to Neutral/low-confidence
-# regardless of actual retail sentiment.
+# Indian retail/investing subreddits, auto-selected for .NS/.BO/.NSE/.BSE
+# tickers when the caller does not pass an explicit ``subreddits``.
+# wallstreetbets/stocks/investing return essentially nothing for NSE/BSE names
+# (they are US-market communities), so the sentiment analyst otherwise always
+# saw an empty Reddit block and defaulted to Neutral/low-confidence regardless
+# of actual retail sentiment.
 #
-# Verified live against Reddit's RSS feed on 2026-09-17 (each subreddit's own
-# feed, not a search — confirms the community exists and is active, not just
-# that the name resolves):
-#   r/IndianStreetBets — active, newest post from today.
-#   r/IndiaInvestments  — active, newest post 3 days old.
-# r/DalalStreet was tried and dropped: the subreddit exists but its RSS
-# feed's newest post was from January 2024 — effectively dead, so including
-# it would just add a guaranteed "<no posts found>" block to every report
-# rather than real signal. r/stocks is kept third for ADR-related discussion
-# (Infosys/INFY, Wipro/WIT, ICICI Bank/IBN, etc. trade on US exchanges and
-# get discussed there).
+# Verified live against each subreddit's own RSS feed on 2026-09-17 (not a
+# search, so it confirms the community is active rather than merely resolving):
+#   r/IndianStreetBets - active, newest post from that day
+#   r/IndiaInvestments - active, newest post 3 days old
+# r/DalalStreet was tried and dropped: it exists, but its newest post was from
+# January 2024, so it would only add a guaranteed "no posts found" line.
+# r/stocks is kept third for ADR discussion (INFY, WIT, IBN trade in the US).
 INDIA_SUBREDDITS = ("IndianStreetBets", "IndiaInvestments", "stocks")
 
-# Cached client_credentials token: (token, expiry_epoch). A lock guards
-# refresh so concurrent callers (e.g. several subreddits fetched close
-# together) don't each fire their own token request.
-_oauth_token_cache: dict[str, object] = {"token": None, "expires_at": 0.0}
-_oauth_lock = threading.Lock()
 
-# Refresh this many seconds before Reddit's own expiry to avoid a token that
-# goes stale mid-request.
-_TOKEN_REFRESH_MARGIN = 60.0
+# Reddit's maximum page size. A week of posts for a ticker across the default
+# subreddits fits well inside one page, which keeps a high-volume subreddit from
+# crowding the others out of a combined search.
+_FEED_PAGE = 100
 
 
-def _get_oauth_token(timeout: float = 10.0) -> str | None:
-    """Return a cached (or freshly fetched) OAuth bearer token, or ``None``.
-
-    ``None`` means either no credentials are configured (the common case —
-    OAuth is opt-in) or the token request itself failed; both are treated
-    identically by callers, which fall back to the RSS path. Reddit's
-    ``client_credentials`` grant needs only the app's id/secret (no separate
-    Reddit account login), matching a "script" app created at
-    reddit.com/prefs/apps.
-    """
-    client_id = os.getenv("REDDIT_CLIENT_ID")
-    client_secret = os.getenv("REDDIT_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        return None
-
-    with _oauth_lock:
-        cached_token = _oauth_token_cache["token"]
-        if cached_token and time.time() < _oauth_token_cache["expires_at"]:
-            return cached_token
-
-        basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-        body = urlencode({"grant_type": "client_credentials"}).encode()
-        req = Request(
-            _TOKEN_URL,
-            data=body,
-            headers={
-                "Authorization": f"Basic {basic}",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": _UA,
-            },
-        )
-        try:
-            with urlopen(req, timeout=timeout) as resp:
-                payload = json.loads(resp.read())
-        except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
-            logger.warning(
-                "Reddit OAuth token request failed: %s — falling back to the RSS path.", exc
-            )
-            return None
-
-        token = payload.get("access_token")
-        expires_in = payload.get("expires_in")
-        if not token or not isinstance(expires_in, (int, float)):
-            logger.warning(
-                "Reddit OAuth token response missing access_token/expires_in — "
-                "falling back to the RSS path."
-            )
-            return None
-
-        _oauth_token_cache["token"] = token
-        _oauth_token_cache["expires_at"] = time.time() + expires_in - _TOKEN_REFRESH_MARGIN
-        return token
+_SEARCH_LOOKBACK = timedelta(days=7)  # matches t=week below
 
 
 def _search_qs(ticker: str, limit: int) -> str:
@@ -221,103 +149,6 @@ def _jitter(seconds: float, frac: float = 0.2) -> float:
     return seconds * (1.0 + random.uniform(-frac, frac))
 
 
-class _RateLimit:
-    """Process-wide view of Reddit's anonymous per-IP budget.
-
-    Reddit states the budget on every response — ``x-ratelimit-remaining`` and
-    ``x-ratelimit-reset`` (seconds until the window rolls over) — on 429s as
-    well as 200s. Measured 2026-09-20: one request exhausts the window
-    (``remaining: 0.0``) and the reset counts down from roughly 12-60s.
-
-    Reading those headers is what makes Reddit usable at all here. The budget
-    is per-IP and cumulative across a whole run, so spacing requests within one
-    ticker never helped: the limit is shared by every subreddit, every ticker
-    and every concurrent analysis on the same network. Waiting the amount
-    Reddit actually asks for beats both hammering it (429 after 429) and the
-    old blind 60s guess, which was usually far longer than required.
-    """
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._remaining: float | None = None
-        self._ready_at: float = 0.0
-
-    def observe(self, headers) -> None:
-        """Record the budget stated by a response (200 or 429)."""
-        if headers is None:
-            return
-        try:
-            remaining = headers.get("x-ratelimit-remaining")
-            reset = headers.get("x-ratelimit-reset")
-            with self._lock:
-                if remaining is not None:
-                    self._remaining = float(remaining)
-                if reset is not None:
-                    self._ready_at = time.monotonic() + float(reset)
-        except (TypeError, ValueError):
-            return  # unparseable headers: fall back to the reactive path
-
-    def seconds_until_slot(self) -> float:
-        """How long to wait before the next request is likely to be served."""
-        with self._lock:
-            if self._remaining is None or self._remaining > 0:
-                return 0.0
-            return max(0.0, self._ready_at - time.monotonic())
-
-    def wait_for_slot(self, max_wait: float) -> bool:
-        """Block until the budget refreshes. False when that would exceed
-        ``max_wait`` — the caller then reports the fetch unavailable rather
-        than stalling a batch run for minutes."""
-        delay = self.seconds_until_slot()
-        if delay <= 0:
-            return True
-        if delay > max_wait:
-            logger.warning(
-                "Reddit rate limit needs %.0fs but the cap is %.0fs; skipping this fetch.",
-                delay, max_wait,
-            )
-            return False
-        logger.info("Reddit rate limit: waiting %.0fs for the window to reset.", delay)
-        time.sleep(delay)
-        with self._lock:
-            self._remaining = None  # assume a fresh window until told otherwise
-        return True
-
-    def reset(self) -> None:
-        with self._lock:
-            self._remaining = None
-            self._ready_at = 0.0
-
-
-_RATE_LIMIT = _RateLimit()
-
-# How long a single fetch may block waiting for Reddit's window. One ticker's
-# three subreddits can therefore cost about three of these in the worst case,
-# which is why a large batch is still better served by --no-reddit.
-_DEFAULT_MAX_WAIT = 75.0
-
-
-def _max_wait_seconds() -> float:
-    from .config import get_config
-
-    return float(get_config().get("reddit_max_wait_seconds", _DEFAULT_MAX_WAIT))
-
-
-def _reset_after_seconds(exc: HTTPError) -> float | None:
-    """Seconds until the budget resets, per the 429's own headers.
-
-    Reddit omits ``Retry-After`` on these 429s but does send
-    ``x-ratelimit-reset``, so this is usually the difference between waiting
-    the ~12s actually required and the 60s the blind fallback assumed.
-    """
-    try:
-        headers = getattr(exc, "headers", None)
-        reset = headers.get("x-ratelimit-reset") if headers else None
-        return min(float(reset), 120.0) if reset is not None else None
-    except (TypeError, ValueError, AttributeError):
-        return None
-
-
 def _retry_after_seconds(exc: HTTPError) -> float | None:
     """Seconds to wait from a 429's ``Retry-After`` header, capped at 60s.
 
@@ -361,8 +192,7 @@ def _fetch_subreddit_rss(
 ) -> list[dict] | None:
     """Default path: parse the public Atom search feed for a subreddit.
 
-    Carries no score / comment counts, so those fields are left None and the
-    post is tagged ``source="rss"`` for honest display. On a 429 (Reddit's
+    ``sub`` may be one subreddit or several joined with ``+``. On a 429 (Reddit's
     per-IP rate limit) we back off once — honouring ``Retry-After`` when
     present — before giving up, so a transient burst doesn't blank the feed.
 
@@ -373,33 +203,15 @@ def _fetch_subreddit_rss(
     """
     url = _RSS.format(sub=sub, qs=_search_qs(ticker, limit))
     req = Request(url, headers={"User-Agent": _UA})
-    # Proactive: if Reddit already told us the budget is spent, wait for the
-    # window it named rather than spending this request on a certain 429.
-    if not _RATE_LIMIT.wait_for_slot(_max_wait_seconds()):
-        return None
     try:
         with urlopen(req, timeout=timeout) as resp:
-            # getattr, not attribute access: a response without headers must
-            # still be parsed, not turned into a failed fetch.
-            _RATE_LIMIT.observe(getattr(resp, "headers", None))
             root = ET.fromstring(_read_capped(resp))
     except HTTPError as exc:
-        _RATE_LIMIT.observe(getattr(exc, "headers", None))
         if exc.code == 429 and _retry:
-            # Prefer what the response actually states: Retry-After when
-            # present, else x-ratelimit-reset (Reddit sends the latter but not
-            # the former here). Jitter only our own blind fallback, so
-            # concurrent runs don't retry in lockstep.
+            # Honour a server-supplied Retry-After exactly (including 0); jitter
+            # only our own fallback so concurrent runs don't retry in lockstep.
             retry_after = _retry_after_seconds(exc)
-            if retry_after is None:
-                retry_after = _reset_after_seconds(exc)
             wait = retry_after if retry_after is not None else _jitter(_RETRY_FALLBACK_SECONDS)
-            if wait > _max_wait_seconds():
-                logger.warning(
-                    "Reddit 429 for r/%s · %s needs %.0fs, over the %.0fs cap — giving up.",
-                    sub, ticker, wait, _max_wait_seconds(),
-                )
-                return None
             logger.warning(
                 "Reddit RSS 429 for r/%s · %s — backing off %.1fs then retrying once",
                 sub, ticker, wait,
@@ -419,185 +231,96 @@ def _fetch_subreddit_rss(
         title_el = entry.find("atom:title", _ATOM_NS)
         published_el = entry.find("atom:published", _ATOM_NS)
         content_el = entry.find("atom:content", _ATOM_NS)
+        category_el = entry.find("atom:category", _ATOM_NS)
         posts.append({
             "title": (title_el.text if title_el is not None else "") or "",
-            "score": None,
-            "num_comments": None,
             "created_utc": _iso_to_timestamp(
                 published_el.text if published_el is not None else None
             ),
             "selftext": _strip_html(content_el.text if content_el is not None else ""),
-            "source": "rss",
+            # A combined feed names each entry's subreddit; a single-subreddit
+            # feed may omit it, and then it can only be that one.
+            "subreddit": category_el.get("term") if category_el is not None
+            else (sub if "+" not in sub else ""),
         })
     return posts
-
-
-def _fetch_subreddit_json(
-    ticker: str,
-    sub: str,
-    limit: int,
-    timeout: float,
-    token: str,
-) -> list[dict] | None:
-    """OAuth JSON search path (carries real score / comment counts).
-
-    Only ever called with a valid bearer ``token`` — without OAuth, Reddit's
-    WAF returns ``403 Blocked`` on this endpoint for anonymous clients
-    (issue #862). Returns ``None`` (not ``[]``) on any failure so the caller
-    falls back to RSS rather than reporting a failure as "no posts" (#1295).
-    """
-    url = _API.format(sub=sub, qs=_search_qs(ticker, limit))
-    req = Request(
-        url,
-        headers={
-            "User-Agent": _UA,
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
-    )
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(_read_capped(resp))
-        children = (payload.get("data") or {}).get("children") or []
-        return [c.get("data", {}) for c in children if isinstance(c, dict)]
-    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
-        logger.warning(
-            "Reddit OAuth fetch failed for r/%s · %s: %s — falling back to RSS feed.",
-            sub, ticker, exc,
-        )
-        return None
-
-
-def _fetch_subreddit(
-    ticker: str,
-    sub: str,
-    limit: int,
-    timeout: float,
-    _retry: bool = True,
-) -> list[dict] | None:
-    """Fetch one subreddit. ``None`` means the fetch failed.
-
-    Tries the OAuth JSON path first when ``REDDIT_CLIENT_ID``/
-    ``REDDIT_CLIENT_SECRET`` are configured — an OAuth client has its own
-    per-client rate budget rather than sharing the anonymous per-IP pool, and
-    JSON carries real score/comment counts RSS cannot. Falls back to RSS on
-    any OAuth failure (no credentials, bad credentials, a failed token
-    request, or the search call itself failing) so a misconfigured app
-    degrades instead of losing Reddit data for the run.
-    """
-    token = _get_oauth_token(timeout=timeout)
-    if token is not None:
-        posts = _fetch_subreddit_json(ticker, sub, limit, timeout, token)
-        if posts is not None:
-            return posts
-    return _fetch_subreddit_rss(ticker, sub, limit, timeout, _retry=_retry)
 
 
 def fetch_reddit_posts(
     ticker: str,
     subreddits: Iterable[str] | None = None,
+    *,
     limit_per_sub: int = 5,
     timeout: float = 10.0,
-    inter_request_delay: float = 1.0,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> str:
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
 
-    ``subreddits=None`` (the default) auto-selects: ``INDIA_SUBREDDITS`` for
-    an NSE/BSE-suffixed ticker, ``DEFAULT_SUBREDDITS`` otherwise. Pass an
-    explicit iterable to override for either case.
-
-    ``inter_request_delay`` paces the per-subreddit requests to stay under
-    Reddit's public per-IP rate limit on the RSS path (the default, no
-    credentials configured). With ``REDDIT_CLIENT_ID``/``REDDIT_CLIENT_SECRET``
-    set, requests go through Reddit's OAuth JSON endpoint instead, which has
-    its own per-client budget rather than sharing the anonymous per-IP pool —
-    the actual fix for repeated 429s in a multi-ticker batch run, not just a
-    slower pace against the same limit.
+    All subreddits are searched in one combined feed (``r/a+b+c``): anonymous
+    RSS allows about one request per minute per IP, so a request per subreddit
+    spent a back-off on almost every run. Each entry names its subreddit, and
+    posts are grouped back by it.
 
     When ``start_date``/``end_date`` (yyyy-mm-dd) are given, posts are trimmed to
     that window so a historical run does not leak current discussion into a
     backtest (#1220).
     """
+    # Crypto reaches us as a Yahoo pair (BTC-USD); search Reddit for the base
+    # ("BTC") so the query actually matches discussion instead of near-nothing.
     india = is_india_ticker(ticker)
     if subreddits is None:
         subreddits = INDIA_SUBREDDITS if india else DEFAULT_SUBREDDITS
-    # Crypto reaches us as a Yahoo pair (BTC-USD); search Reddit for the base
-    # ("BTC") so the query actually matches discussion instead of near-nothing.
-    # Indian tickers reach us with an exchange suffix (RELIANCE.NS) that
-    # retail posts never spell out — search for the bare NSE/BSE root instead.
+    # Crypto arrives as a Yahoo pair (BTC-USD) and Indian tickers carry an
+    # exchange suffix (RELIANCE.NS) that retail posts never spell out; search
+    # for the bare root so the query matches real discussion.
     ticker = crypto_base(ticker) or (strip_india_suffix(ticker) if india else ticker)
     subreddits = list(subreddits)
-    blocks = []
-    total_posts = 0
-    unavailable = []
-    allow_retry = True
-    for i, sub in enumerate(subreddits):
-        if i > 0 and inter_request_delay:
-            time.sleep(_jitter(inter_request_delay))
-        fetched = _fetch_subreddit(ticker, sub, limit_per_sub, timeout, _retry=allow_retry)
-        if fetched is None:
-            # A failed fetch is not an absence of discussion, so it must not be
-            # rendered as "no posts found" (#1295). One failure also means the
-            # per-IP budget is likely gone, so skip the (now 60s) back-off on
-            # the remaining subreddits rather than stalling the run on retries
-            # that cannot succeed; #1286 tracks coordinating this properly.
-            allow_retry = False
-            unavailable.append(sub)
-            blocks.append(f"r/{sub}: <unavailable: fetch failed, not an absence of posts>")
-            continue
-        posts = _within_window(fetched, start_date, end_date)
-        total_posts += len(posts)
-        if not posts:
-            blocks.append(f"r/{sub}: <no posts found mentioning {ticker.upper()} in the past 7 days>")
-            continue
+    label = ", ".join(f"r/{s}" for s in subreddits)
+    fetched = _fetch_subreddit_rss(ticker, "+".join(subreddits), _FEED_PAGE, timeout)
+    if fetched is None:
+        return f"<Reddit unavailable: fetch failed ({label}); this is not an absence of discussion>"
 
-        via_rss = any(p.get("source") == "rss" for p in posts)
-        header = f"r/{sub} — {len(posts)} recent posts mentioning {ticker.upper()}"
-        header += " (via RSS feed; scores/comments unavailable):" if via_rss else ":"
-        lines = [header]
-        for p in posts:
-            title = (p.get("title") or "").replace("\n", " ").strip()
-            score = p.get("score")
-            comments = p.get("num_comments")
-            created = p.get("created_utc")
-            created_str = (
-                time.strftime("%Y-%m-%d", time.gmtime(created)) if created else "?"
+    window = bool(start_date and end_date)
+    posts = _within_window(fetched, start_date, end_date)
+    if not posts:
+        gap = window and coverage_gap(
+            _coverage_dates(fetched), start_date, end_date,
+            "Reddit search", f"discussion of {ticker.upper()}",
+        )
+        period = f"within {start_date}..{end_date}" if window else "in the past 7 days"
+        return gap or f"<no Reddit posts found mentioning {ticker.upper()} across {label} {period}>"
+
+    # Group by the subreddit each entry names, in the requested order. Nothing
+    # is dropped: an unlabelled post from a one-subreddit request belongs to it,
+    # and any other name gets its own block.
+    by_sub = {s.lower(): (s, []) for s in subreddits}
+    for p in posts:
+        name = p.get("subreddit") or (subreddits[0] if len(subreddits) == 1 else "unknown")
+        by_sub.setdefault(name.lower(), (name, []))[1].append(p)
+
+    page_full = len(fetched) >= _FEED_PAGE
+    blocks = []
+    for sub, sub_posts in by_sub.values():
+        if not sub_posts:
+            blocks.append(
+                f"r/{sub}: <not among the newest {_FEED_PAGE} matches across {label}>"
+                if page_full else f"r/{sub}: <no posts found mentioning {ticker.upper()}>"
             )
-            # Score / comment counts are absent on the RSS fallback path —
-            # show them only when present rather than printing fake zeros.
-            meta = created_str
-            if score is not None and comments is not None:
-                meta += f" · {score:>4}↑ · {comments:>3}c"
+            continue
+        sub_posts = sub_posts[:limit_per_sub]  # the feed is newest-first
+        lines = [f"r/{sub} — {len(sub_posts)} recent posts mentioning {ticker.upper()}:"]
+        for p in sub_posts:
+            title = (p.get("title") or "").replace("\n", " ").strip()
+            created = p.get("created_utc")
+            created_str = time.strftime("%Y-%m-%d", time.gmtime(created)) if created else "?"
             selftext = (p.get("selftext") or "").replace("\n", " ").strip()
             if len(selftext) > 240:
                 selftext = selftext[:240] + "…"
             lines.append(
-                f"  [{meta}] {title}"
+                f"  [{created_str}] {title}"
                 + (f"\n    body excerpt: {selftext}" if selftext else "")
             )
         blocks.append("\n".join(lines))
-
-    if total_posts == 0:
-        searched = [s for s in subreddits if s not in unavailable]
-        if not searched:
-            # Every source failed: claiming "no posts" here would assert a
-            # silence we never observed.
-            return (
-                f"<Reddit unavailable: every source failed to fetch "
-                f"({', '.join(f'r/{s}' for s in unavailable)}); this is not an "
-                f"absence of discussion>"
-            )
-        summary = (
-            f"<no Reddit posts found mentioning {ticker.upper()} across "
-            f"{', '.join(f'r/{s}' for s in searched)} in the past 7 days>"
-        )
-        if unavailable:
-            summary += (
-                f"\n<unavailable (fetch failed): "
-                f"{', '.join(f'r/{s}' for s in unavailable)}>"
-            )
-        return summary
     return "\n\n".join(blocks)
