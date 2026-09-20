@@ -9,7 +9,6 @@ here rather than only in production.
 from __future__ import annotations
 
 import http.client
-import xml.etree.ElementTree as ET
 from unittest.mock import patch
 from urllib.error import HTTPError
 
