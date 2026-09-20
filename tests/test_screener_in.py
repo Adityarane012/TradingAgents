@@ -364,3 +364,41 @@ class TestCompaniesWithNoPromoter:
         serve(page(rows=rows))
         with pytest.raises(IndiaDataInvalid, match="missing fii"):
             screener_in.get_snapshot("HDFCBANK.NS", TODAY)
+
+
+class TestOthersBucket:
+    """screener.in carries an "Others" row (employee trusts, DR custodians,
+    unclassified holders) for some companies. Ignoring it made the column sum
+    short and fail the 100% check, rejecting the company outright. Found by
+    preflighting the remaining tickers: M&M totalled 96.18 without its ~3.8%
+    Others row and returned zero quarters; ETERNAL's 1.82% pushed it just past
+    the tolerance.
+    """
+
+    def _page_with_others(self, others: str) -> str:
+        rows = dict(_DEFAULT_ROWS)
+        rows["Promoters +"] = ["19.33%", "18.44%"]
+        rows["FIIs +"] = ["40.26%", "34.89%"]
+        rows["DIIs +"] = ["26.79%", "32.58%"]
+        rows["Government +"] = ["0.07%", "0.07%"]
+        rows["Public +"] = ["9.73%", "10.47%"]
+        rows["Others +"] = [others, "3.47%"]
+        return page(rows=rows)
+
+    def test_the_others_row_is_counted_toward_100(self, serve):
+        serve(self._page_with_others("3.82%"))
+        holdings = screener_in.get_snapshot("M&M.NS", TODAY).holdings
+        assert len(holdings) == 2, "both quarters should validate once Others is counted"
+        assert holdings[-1].others == 3.47
+        assert holdings[-1].promoters == 18.44
+
+    def test_a_company_without_an_others_row_is_unaffected(self, serve):
+        serve(page())
+        holdings = screener_in.get_snapshot("RELIANCE.NS", TODAY).holdings
+        assert holdings and all(h.others == 0.0 for h in holdings)
+
+    def test_a_genuinely_short_column_is_still_rejected(self, serve):
+        """Counting Others must not become a licence to accept any total."""
+        serve(self._page_with_others("0.50%"))  # leaves ~3.3pp unaccounted
+        holdings = screener_in.get_snapshot("M&M.NS", TODAY).holdings
+        assert [h.quarter for h in holdings] == ["Jun 2026"]

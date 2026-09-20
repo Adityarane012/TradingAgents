@@ -81,6 +81,12 @@ _HOLDER_ROWS = {
     "diis": "dii",
     "government": "government",
     "public": "public",
+    # screener.in carries an "Others" bucket (employee trusts, DR custodians,
+    # unclassified holders) for some companies. Omitting it made the column
+    # sum short and fail the 100% check: M&M totalled 96.18 without its ~3.8%
+    # Others row and was rejected outright, and ETERNAL's 1.82% pushed it just
+    # past the tolerance. It is part of the 100%, so it has to be counted.
+    "others": "others",
 }
 # The headline ratios worth carrying. Keyed by screener's own label.
 _RATIOS = ("Market Cap", "Stock P/E", "Book Value", "Dividend Yield", "ROCE", "ROE")
@@ -114,6 +120,9 @@ class QuarterHolding:
     dii: float
     public: float
     government: float = 0.0
+    # Employee trusts, DR custodians and unclassified holders. Small but part
+    # of the 100%, so it must be carried or the column fails validation.
+    others: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -230,7 +239,12 @@ def _parse_holdings(sel: Selector) -> tuple[list[QuarterHolding], str | None]:
     for i, quarter in enumerate(quarters):
         try:
             values = {k: rows[k][i] for k in ("promoters", "fii", "dii", "public")}
-            values["government"] = (rows.get("government") or [])[i] if rows.get("government") else 0.0
+            # Optional buckets: absent for many companies, but when present
+            # they are part of the 100% and must be summed, or the column is
+            # wrongly rejected as not adding up.
+            for optional in ("government", "others"):
+                series = rows.get(optional)
+                values[optional] = series[i] if series else 0.0
         except IndexError:
             continue  # ragged row: skip this column rather than mis-align it
         if any(v is None for v in values.values()):
