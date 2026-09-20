@@ -197,7 +197,7 @@ Fast-moving signal. Each message carries a user-labeled sentiment tag (Bullish /
 <end_of_stocktwits>
 
 ### Reddit posts — {reddit_subs} (past 7 days)
-Community discussion. Engagement signal via upvote score and comment count. Subreddit character matters ({reddit_character})
+Community discussion, without vote or comment counts — the anonymous RSS feed does not carry them, so weigh these posts by content, not by apparent popularity. Subreddit character matters ({reddit_character})
 
 <start_of_reddit>
 {reddit_block}
