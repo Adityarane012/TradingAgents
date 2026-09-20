@@ -724,3 +724,72 @@ class TestBlocks:
         broken = patch.object(nse_india, "get_fii_dii", side_effect=RuntimeError("bug"))
         with broken, pytest.raises(RuntimeError):
             nse_india.fii_dii_block("2026-09-18")
+
+
+# --- shareholding shapes the Reliance fixture does not cover ----------------------------
+
+
+class TestShareholdingVariants:
+    """Real Infosys and HDFC Bank rows (2026-09-20). The first version of the
+    promoter+public==100 check wrongly rejected every Infosys filing because it
+    ignored the employee-trusts slice; the live verification script caught it."""
+
+    def _serve(self, nse, symbol):
+        nse.routes["corporate-share-holdings-master"] = load("nse_shareholding_variants.json")[
+            symbol
+        ]
+
+    def test_employee_trusts_count_toward_the_hundred_percent(self, nse):
+        self._serve(nse, "INFY")
+        rows = nse_india.get_shareholding("INFY.NS", "2026-09-20")
+        assert len(rows) == 4
+        top = rows[0]
+        assert (top.promoter_pct, top.public_pct, top.other_pct) == (13.82, 85.97, 0.21)
+
+    def test_a_row_short_by_more_than_the_trusts_is_still_rejected(self, nse):
+        self._serve(nse, "INFY")
+        payload = nse.routes["corporate-share-holdings-master"]
+        payload[0]["employeeTrusts"] = "0"  # 13.82 + 85.97 = 99.79: no longer sums to 100
+        rows = nse_india.get_shareholding("INFY.NS", "2026-09-20")
+        assert len(rows) == 3
+        assert rows[0].quarter_end == date(2026, 3, 31)
+
+    def test_missing_trust_fields_default_to_zero(self, nse):
+        payload = load("nse_shareholding_reliance.json")
+        for row in payload:
+            row.pop("employeeTrusts", None)
+            row.pop("underlyingDrs", None)
+        nse.routes["corporate-share-holdings-master"] = payload
+        assert nse_india.get_shareholding("RELIANCE.NS", "2026-09-20")[0].other_pct == 0.0
+
+    def test_a_company_with_no_promoter_reports_zero(self, nse):
+        self._serve(nse, "HDFCBANK")
+        rows = nse_india.get_shareholding("HDFCBANK.NS", "2026-09-20")
+        assert all(r.promoter_pct == 0 and r.public_pct == 100 for r in rows)
+
+    def test_the_block_explains_a_zero_promoter_instead_of_leaving_a_bare_zero(self, nse):
+        self._serve(nse, "HDFCBANK")
+        text = nse_india.shareholding_block("HDFCBANK.NS", "2026-09-20")
+        assert "no identified promoter" in text
+        assert "not missing data" in text
+        assert "Promoter holding change" not in text
+
+    def test_the_trusts_column_appears_only_when_there_is_something_to_show(self, nse):
+        self._serve(nse, "INFY")
+        infy = nse_india.shareholding_block("INFY.NS", "2026-09-20")
+        assert "| Employee trusts % |" in infy
+        assert "| 30-Jun-2026 | 13.82 | 85.97 | 0.21 |" in infy
+        nse_india.reset_state()
+        reliance = nse_india.shareholding_block("RELIANCE.NS", "2026-09-20")
+        assert "Employee trusts" not in reliance
+
+    def test_skipped_rows_are_logged_once_not_per_row(self, nse, caplog):
+        payload = load("nse_shareholding_reliance.json")
+        for row in payload[:5]:
+            row["public_val"] = "1"
+        nse.routes["corporate-share-holdings-master"] = payload
+        with caplog.at_level("WARNING", logger=nse_india.logger.name):
+            nse_india.get_shareholding("RELIANCE.NS", "2026-09-20")
+        skipped = [r for r in caplog.records if "failed validation" in r.getMessage()]
+        assert len(skipped) == 1
+        assert "skipped 5 row(s)" in skipped[0].getMessage()

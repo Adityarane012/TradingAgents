@@ -87,7 +87,7 @@ _FLOW_TOLERANCE = 0.05  # crore; net must equal buy - sell to the paisa
 _PCT_TOLERANCE = 0.25  # percentage points; NSE rounds last/previous close
 _MIN_STRIKES = 10
 _PCR_RANGE = (0.2, 5.0)
-_HOLDING_SUM_TOLERANCE = 0.05  # promoter% + public% must be ~100
+_HOLDING_SUM_TOLERANCE = 0.05  # promoter + public + employee trusts must be ~100
 
 _THROTTLE = Throttle(_MIN_INTERVAL)
 _BREAKER = CircuitBreaker(threshold=3, cooldown=300.0)
@@ -428,6 +428,9 @@ class ShareholdingRow:
     promoter_pct: float
     public_pct: float
     filed: datetime
+    # Shares held by employee benefit trusts (and DR custodians): neither
+    # promoter nor public, but part of the 100% (Infosys: ~0.2%).
+    other_pct: float = 0.0
 
 
 def get_shareholding(
@@ -436,8 +439,9 @@ def get_shareholding(
     """Promoter/public holding for the last ``quarters`` filings, newest first.
 
     Only filings public on or before the trade date are used. Each row is
-    checked to be for the requested symbol and to sum to ~100%; a bad row is
-    skipped, and if nothing usable remains the call fails.
+    checked to be for the requested symbol and for promoter + public + employee
+    trusts to sum to ~100%; a bad row is skipped, and if nothing usable remains
+    the call fails.
     """
     symbol = nse_symbol(ticker)
     curr = resolve_curr_date(curr_date)
@@ -457,25 +461,32 @@ def get_shareholding(
             filed = parse_nse_datetime(row.get("broadcastDate") or row.get("submissionDate"))
             promoter = to_float(row["pr_and_prgrp"])
             public = to_float(row["public_val"])
+            # Employee trusts / DR custodians are a third slice of the 100%. A
+            # promoter-plus-public-only check wrongly rejects every Infosys
+            # filing (13.82 + 85.97 + 0.21 trusts).
+            other = (to_float(row.get("employeeTrusts")) or 0.0) + (
+                to_float(row.get("underlyingDrs")) or 0.0
+            )
             if (
                 quarter_end is None
                 or filed is None
                 or promoter is None
                 or public is None
-                or not (0 <= promoter <= 100 and 0 <= public <= 100)
-                or abs(promoter + public - 100) > _HOLDING_SUM_TOLERANCE
+                or not (0 <= promoter <= 100 and 0 <= public <= 100 and 0 <= other <= 100)
+                or abs(promoter + public + other - 100) > _HOLDING_SUM_TOLERANCE
             ):
                 invalid += 1
-                logger.warning(
-                    "NSE shareholding for %s: skipped an invalid row (%s)", symbol, row.get("date")
-                )
                 continue
             if not published_by(filed, curr):
                 future += 1
                 continue
             current = latest.get(quarter_end)
             if current is None or filed > current.filed:
-                latest[quarter_end] = ShareholdingRow(quarter_end, promoter, public, filed)
+                latest[quarter_end] = ShareholdingRow(quarter_end, promoter, public, filed, other)
+        if invalid:
+            logger.warning(
+                "NSE shareholding for %s: skipped %d row(s) that failed validation", symbol, invalid
+            )
 
     if not latest:
         if invalid and not future:
@@ -648,18 +659,28 @@ def shareholding_block(
 ) -> str:
     def produce() -> str:
         rows = get_shareholding(ticker, curr_date, quarters)
+        show_other = any(r.other_pct > 0 for r in rows)
         lines = [
             "Shareholding pattern from NSE filings (promoter & promoter group / public; "
             "FII/DII split not in this source):",
-            "| Quarter end | Promoter % | Public % | Filed |",
-            "|---|---|---|---|",
+            "| Quarter end | Promoter % | Public % |"
+            + (" Employee trusts % |" if show_other else "")
+            + " Filed |",
+            "|---|---|---|" + ("---|" if show_other else "") + "---|",
         ]
-        lines += [
-            f"| {_stamp(r.quarter_end)} | {r.promoter_pct:.2f} | {r.public_pct:.2f} | "
-            f"{_stamp(r.filed.date())} |"
-            for r in rows
-        ]
-        if len(rows) >= 2:
+        for r in rows:
+            other = f" {r.other_pct:.2f} |" if show_other else ""
+            lines.append(
+                f"| {_stamp(r.quarter_end)} | {r.promoter_pct:.2f} | {r.public_pct:.2f} |"
+                f"{other} {_stamp(r.filed.date())} |"
+            )
+        if all(r.promoter_pct == 0 for r in rows):
+            lines.append(
+                "NSE reports no promoter holding in any of these filings: the company has no "
+                "identified promoter (widely held / professionally managed), so 0% is the "
+                "reported figure, not missing data."
+            )
+        elif len(rows) >= 2:
             delta = rows[0].promoter_pct - rows[1].promoter_pct
             lines.append(f"Promoter holding change vs previous filing: {delta:+.2f} pp")
         return "\n".join(lines)

@@ -16,3 +16,7 @@ shapes NSE actually returns. Tests never touch the network.
 
 If NSE changes a response shape, recapture the affected file and update the
 parser and tests together.
+
+`nse_shareholding_variants.json` holds real rows for two shapes the Reliance rows do not
+cover: Infosys (employee trusts are a third slice of the 100%, so promoter +
+public alone is 99.79) and HDFC Bank (no promoter at all, reported as 0).
