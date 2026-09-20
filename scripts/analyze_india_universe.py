@@ -44,7 +44,7 @@ from pathlib import Path
 
 from tradingagents.agents.utils.rating import is_review
 from tradingagents.dataflows.india_universe import NIFTY_50_APPROX, verify_universe
-from tradingagents.dataflows.utils import get_current_date
+from tradingagents.dataflows.utils import get_current_date, safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -121,6 +121,12 @@ def main() -> int:
                          help="Override max_debate_rounds (default: config default).")
     parser.add_argument("--risk-rounds", type=int, default=None,
                          help="Override max_risk_discuss_rounds (default: config default).")
+    parser.add_argument("--provider", default=None,
+                         help="Override llm_provider (default: config default, 'openai').")
+    parser.add_argument("--deep-model", default=None,
+                         help="Override deep_think_llm.")
+    parser.add_argument("--quick-model", default=None,
+                         help="Override quick_think_llm.")
     parser.add_argument("--dry-run", action="store_true",
                          help="Print the plan and exit. No network or LLM calls.")
     parser.add_argument("--verify-only", action="store_true",
@@ -166,6 +172,12 @@ def main() -> int:
         config["max_debate_rounds"] = args.debate_rounds
     if args.risk_rounds is not None:
         config["max_risk_discuss_rounds"] = args.risk_rounds
+    if args.provider is not None:
+        config["llm_provider"] = args.provider
+    if args.deep_model is not None:
+        config["deep_think_llm"] = args.deep_model
+    if args.quick_model is not None:
+        config["quick_think_llm"] = args.quick_model
 
     # One graph instance, reused across tickers — propagate() reassigns
     # self.ticker per call by design, so this avoids rebuilding LLM clients
@@ -185,12 +197,18 @@ def main() -> int:
             final_state, signal = ta.propagate(ticker, date)
             elapsed = time.monotonic() - started
             decision = (final_state.get("final_trade_decision") or "")[:200]
+            report_path = ta.save_reports(
+                final_state,
+                ticker,
+                save_path=Path(DEFAULT_CONFIG["results_dir"]) / "reports"
+                / f"{safe_ticker_component(ticker)}_{date}",
+            )
             row.update({
                 "status": "ok", "signal": signal, "decision_excerpt": decision,
                 "elapsed_seconds": round(elapsed, 1), "error": "",
             })
             tag = "REVIEW (no parseable rating)" if is_review(signal) else signal
-            print(f"  -> {tag}  ({elapsed:.0f}s)")
+            print(f"  -> {tag}  ({elapsed:.0f}s)  report: {report_path}")
             tally[signal] = tally.get(signal, 0) + 1
         except Exception as exc:  # noqa: BLE001 — one bad ticker must not kill the batch
             elapsed = time.monotonic() - started
