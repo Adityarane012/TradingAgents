@@ -122,15 +122,40 @@ class BuildInstrumentContextTests(unittest.TestCase):
         self.assertIn("Currency: USD", context)
         self.assertNotIn("not USD", context)
 
-    def test_mismatched_quote_and_financial_currency_both_shown(self):
+    def test_mismatched_currencies_warn_against_mixing_them(self):
+        """Stating both currencies is not enough: the hazard is combining them.
+
+        Observed live on 2026-09-20 — yfinance reports INFY.NS with
+        currency=INR and financialCurrency=USD, so market cap is in rupees
+        while revenue is in dollars. A price/sales built from both reads 210x
+        instead of ~2.2x: wrong by the exchange rate, and plausible enough to
+        pass review. A real INFY.NS run did print revenue, net income and free
+        cash flow in USD beside a market cap in INR.
+        """
+        for quote, financial in (("USD", "INR"), ("INR", "USD")):
+            context = build_instrument_context(
+                "INFY", "stock",
+                {"company_name": "Infosys Limited",
+                 "currency": quote, "financial_currency": financial},
+            )
+            self.assertIn(
+                f"Quote currency: {quote}; financial-statement currency: {financial}", context
+            )
+            self.assertIn("CURRENCY UNIT MISMATCH", context)
+            self.assertIn("Never combine them in one ratio", context)
+
+    def test_a_usd_financial_currency_does_not_suppress_the_mismatch_warning(self):
+        """The regression this guards: the old code picked financial_currency
+        first, saw "USD", concluded "nothing to warn about" and skipped the
+        currency guidance entirely — for precisely the tickers that needed it.
+        """
         context = build_instrument_context(
-            "INFY", "stock",
-            {"company_name": "Infosys Limited", "currency": "USD", "financial_currency": "INR"},
+            "INFY.NS", "stock",
+            {"company_name": "Infosys Limited", "currency": "INR", "financial_currency": "USD"},
         )
-        self.assertIn("Quote currency: USD; financial-statement currency: INR", context)
-        # The financial-statement currency drives the face-value warning since
-        # it governs how the fundamentals numbers in the report should be read.
-        self.assertIn("reported in INR, not USD", context)
+        self.assertIn("CURRENCY UNIT MISMATCH", context)
+        self.assertIn("market capitalisation and 52-week range are in INR", context)
+        self.assertIn("cash-flow figures are reported in USD", context)
 
     def test_no_currency_data_omits_currency_details(self):
         context = build_instrument_context(

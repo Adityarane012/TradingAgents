@@ -197,16 +197,37 @@ def build_instrument_context(
             "assume company fundamentals are available."
         )
     elif identity:
-        non_usd = next(
-            (c for c in (identity.get("financial_currency"), identity.get("currency")) if c),
-            None,
-        )
-        if non_usd and non_usd != "USD":
+        quote_ccy = identity.get("currency")
+        fin_ccy = identity.get("financial_currency")
+        if quote_ccy and fin_ccy and quote_ccy != fin_ccy:
+            # A real and silent trap: yfinance reports INFY.NS with
+            # currency=INR but financialCurrency=USD, so market cap is in
+            # rupees while revenue and earnings are in dollars. Dividing one
+            # by the other yields a price/sales of ~210x instead of ~2.2x —
+            # wrong by the exchange rate, and plausible enough to go
+            # unnoticed. A previous version of this code made it worse: it
+            # took financial_currency first, saw "USD", and skipped the
+            # non-USD guidance entirely for exactly the tickers that needed
+            # it. State the hazard explicitly instead of only the fact.
             context += (
-                f" Prices and financial figures for this instrument are reported in "
-                f"{non_usd}, not USD — read them at face value in {non_usd} and do not "
-                "restate or benchmark them as if they were USD."
+                f" CURRENCY UNIT MISMATCH — read carefully: the quoted price, market "
+                f"capitalisation and 52-week range are in {quote_ccy}, but the income "
+                f"statement, balance sheet and cash-flow figures are reported in "
+                f"{fin_ccy}. These are different units for the same company. Never "
+                f"combine them in one ratio (market cap over revenue, price over "
+                f"earnings per share, and so on) without converting, and never restate "
+                f"one as the other. Label every figure you cite with its own currency, "
+                f"and if a ratio would require mixing them, say the conversion was not "
+                f"available to you rather than computing it anyway."
             )
+        else:
+            non_usd = fin_ccy or quote_ccy
+            if non_usd and non_usd != "USD":
+                context += (
+                    f" Prices and financial figures for this instrument are reported in "
+                    f"{non_usd}, not USD — read them at face value in {non_usd} and do not "
+                    "restate or benchmark them as if they were USD."
+                )
     return context
 
 
