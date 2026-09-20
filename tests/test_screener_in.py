@@ -327,3 +327,40 @@ class TestContextWiring:
             text = india_context.india_ownership_context("RELIANCE.NS", TODAY)
         assert "Institutional ownership split (screener.in)" in text
         assert "Sources disagree" not in text
+
+
+class TestCompaniesWithNoPromoter:
+    """HDFC Bank, ITC and other professionally managed companies have no
+    promoter. screener.in omits the "Promoters" row entirely for them rather
+    than showing 0%, which made the whole block unavailable in a live batch
+    run ("shareholding table is missing promoters"). The institutional split
+    is the reason this source exists, so only that is genuinely required.
+    """
+
+    def _no_promoter_page(self) -> str:
+        rows = {k: v for k, v in _DEFAULT_ROWS.items() if not k.startswith("Promoters")}
+        rows["Public +"] = ["60.70%", "61.05%"]
+        rows["FIIs +"] = ["18.67%", "17.19%"]
+        rows["DIIs +"] = ["20.46%", "21.10%"]
+        rows["Government +"] = ["0.17%", "0.17%"]
+        return page(rows=rows)
+
+    def test_a_missing_promoter_row_is_read_as_zero(self, serve):
+        serve(self._no_promoter_page())
+        holdings = screener_in.get_snapshot("HDFCBANK.NS", TODAY).holdings
+        assert holdings, "the company should still be parsed"
+        assert all(h.promoters == 0.0 for h in holdings)
+        assert holdings[-1].fii == 17.19
+
+    def test_the_block_still_renders_the_institutional_split(self, serve):
+        serve(self._no_promoter_page())
+        text = screener_in.ownership_split_block("HDFCBANK.NS", TODAY)
+        assert "unavailable" not in text
+        assert "FII 18.67% -> 17.19%" in text
+
+    def test_a_missing_institutional_row_still_fails_loudly(self, serve):
+        """Absent FII/DII means the page changed — that is a real failure."""
+        rows = {k: v for k, v in _DEFAULT_ROWS.items() if not k.startswith("FIIs")}
+        serve(page(rows=rows))
+        with pytest.raises(IndiaDataInvalid, match="missing fii"):
+            screener_in.get_snapshot("HDFCBANK.NS", TODAY)

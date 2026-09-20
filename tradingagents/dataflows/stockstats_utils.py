@@ -60,16 +60,38 @@ def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+# A parsed bar date outside this range is not a date we can have real OHLCV
+# for; it is a damaged row. Treating it as NaT lets _clean_dataframe drop it
+# like any other unparseable value.
+_MIN_PLAUSIBLE_YEAR = 1900
+_MAX_PLAUSIBLE_YEAR = 2200
+
+
 def _local_midnight(value) -> pd.Timestamp:
-    """A single timestamp as its naive, midnight-normalized local date (or NaT)."""
+    """A single timestamp as its naive, midnight-normalized local date (or NaT).
+
+    Implausible years are rejected as NaT rather than returned. A truncated
+    date string parses without error but silently means something absurd:
+    ``pd.Timestamp("9-17")`` is year 1, and the overflow only surfaces later
+    when the column is cast to datetime64[ns], where it takes down the whole
+    ticker instead of the one bad row. Seen in the wild from a cache CSV whose
+    ``2026-09-17`` had lost its leading ``202`` to an interrupted write.
+    """
     if pd.isna(value):
         return pd.NaT
     try:
         ts = pd.Timestamp(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return pd.NaT
     if ts.tzinfo is not None:
         ts = ts.tz_localize(None)  # drop tz, keep the local wall-clock date
+    if not _MIN_PLAUSIBLE_YEAR <= ts.year <= _MAX_PLAUSIBLE_YEAR:
+        logger.warning(
+            "Dropping a bar dated %s (parsed from %r): implausible year, "
+            "the source row is likely damaged.",
+            ts.date(), value,
+        )
+        return pd.NaT
     return ts.normalize()
 
 

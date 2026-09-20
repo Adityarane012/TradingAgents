@@ -210,7 +210,15 @@ def _parse_holdings(sel: Selector) -> tuple[list[QuarterHolding], str | None]:
         if key:
             rows[key] = [to_float(c.replace("%", "")) for c in cells[1:]]
 
-    missing = {"promoters", "fii", "dii", "public"} - set(rows)
+    # A company with no promoter (HDFC Bank, ITC, L&T and other professionally
+    # managed names) has no "Promoters" row at all on screener.in — the row is
+    # omitted rather than shown as 0%. Requiring it rejected those companies
+    # outright, which is the same mistake the NSE fetcher already had to fix.
+    # Only the institutional split is genuinely required here, since that is
+    # the reason this source exists.
+    if "promoters" not in rows:
+        rows["promoters"] = [0.0] * len(quarters)
+    missing = {"fii", "dii", "public"} - set(rows)
     if missing:
         raise IndiaDataInvalid(
             _SRC,
