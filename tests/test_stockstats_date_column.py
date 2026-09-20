@@ -112,3 +112,47 @@ class TestDamagedDateRowsAreDropped:
         series = su._normalize_dates(["2026-09-15", "9-17", "2026-09-18"])
         assert str(series.dtype).startswith("datetime64")
         assert series.isna().sum() == 1
+
+
+class TestDamagedCacheSelfHeals:
+    """A cache file with unparseable rows must be refetched, not served short.
+
+    pandas reads these with on_bad_lines="skip", so corrupt values never reach
+    an analysis — but the drop is silent, and a damaged file would serve fewer
+    bars forever. A crash on 2026-09-20 produced exactly this: one cache had
+    two rows merged onto one line (a date sitting in a price column) and
+    another had a fragment starting mid-number.
+    """
+
+    def _write(self, tmp_path, lines: list[str]):
+        f = tmp_path / "X.NS-YFin-data-2021-01-01-2026-01-01.csv"
+        f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return str(f)
+
+    _GOOD = [
+        "Date,Close,High,Low,Open,Volume",
+        "2026-01-02,10,11,9,10,100",
+        "2026-01-05,11,12,10,11,110",
+    ]
+
+    def test_an_intact_cache_is_not_flagged(self, tmp_path):
+        path = self._write(tmp_path, self._GOOD)
+        cached = pd.read_csv(path, on_bad_lines="skip")
+        assert su._cache_is_damaged(path, cached) is False
+
+    def test_a_merged_row_is_detected(self, tmp_path):
+        """The real ADANIPORTS shape: two rows on one line, 10 columns."""
+        path = self._write(tmp_path, [
+            *self._GOOD,
+            "2026-01-06,12,13,11,2026-01-07,12,13,11,12,120",
+        ])
+        cached = pd.read_csv(path, on_bad_lines="skip")
+        assert su._cache_is_damaged(path, cached) is True
+
+    def test_trailing_blank_lines_are_not_mistaken_for_damage(self, tmp_path):
+        path = self._write(tmp_path, [*self._GOOD, "", "  "])
+        cached = pd.read_csv(path, on_bad_lines="skip")
+        assert su._cache_is_damaged(path, cached) is False
+
+    def test_a_missing_file_is_treated_as_damaged(self, tmp_path):
+        assert su._cache_is_damaged(str(tmp_path / "nope.csv"), pd.DataFrame()) is True

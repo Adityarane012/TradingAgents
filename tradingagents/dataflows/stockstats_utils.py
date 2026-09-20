@@ -203,6 +203,35 @@ def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
     return time.time() - os.path.getmtime(data_file) > OHLCV_CACHE_TTL_SECONDS
 
 
+def _cache_is_damaged(data_file: str, cached: pd.DataFrame) -> bool:
+    """True when the cache file has rows ``read_csv`` could not parse.
+
+    ``on_bad_lines="skip"`` keeps malformed rows out of the frame, which stops
+    corrupt values reaching an analysis — but it does so silently, so a damaged
+    file serves fewer bars forever and nothing ever says why. An interrupted
+    write is enough to cause it: a crash on 2026-09-20 left one cache with two
+    rows merged onto one line (a date sitting in a price column) and another
+    with a fragment starting mid-number, and both were simply dropped.
+
+    Comparing the parsed row count against the file's own data lines catches
+    that, so the caller refetches and the cache self-heals.
+    """
+    try:
+        with open(data_file, encoding="utf-8", errors="replace") as handle:
+            data_lines = sum(1 for line in handle if line.strip()) - 1  # minus header
+    except OSError as exc:
+        logger.warning("Could not verify cache %s: %s; refetching.", data_file, exc)
+        return True
+    if data_lines > len(cached):
+        logger.warning(
+            "Cache %s is damaged: %d data lines on disk but only %d parsed "
+            "(likely an interrupted write). Refetching.",
+            os.path.basename(data_file), data_lines, len(cached),
+        )
+        return True
+    return False
+
+
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
@@ -246,6 +275,7 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             not cached.empty
             and "Close" in cached.columns
             and not _needs_same_day_refresh(data_file, curr_date_dt, today_date)
+            and not _cache_is_damaged(data_file, cached)
         ):
             data = cached
 
