@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 import time
 from datetime import datetime
@@ -55,7 +56,7 @@ from pathlib import Path
 from tradingagents.agents.utils.rating import is_review
 from tradingagents.dataflows.india_universe import NIFTY_50_APPROX, verify_universe
 from tradingagents.dataflows.utils import get_current_date, safe_ticker_component
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import DEFAULT_CONFIG, FREE_TIER_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 CSV_FIELDS = [
@@ -141,6 +142,11 @@ def main() -> int:
                          help="Skip Reddit entirely (News + StockTwits only for sentiment). "
                               "Avoids per-IP rate-limit backoffs on a multi-ticker run when "
                               "you don't have REDDIT_CLIENT_ID/SECRET configured.")
+    parser.add_argument("--free", action="store_true",
+                         help="Zero-cost preset: Gemini's free tier (1,000 req/day, the only "
+                              "one whose token budget clears a full run), keyless data vendors "
+                              "only, and a reduced indicator budget to cut tokens per ticker. "
+                              "Explicit --provider/--deep-model/--quick-model still win.")
     parser.add_argument("--no-india-data", action="store_true",
                          help="Skip the NSE context (FII/DII flows, India VIX, Nifty PCR, "
                               "promoter shareholding, corporate actions, announcements). "
@@ -191,6 +197,22 @@ def main() -> int:
         config["max_debate_rounds"] = args.debate_rounds
     if args.risk_rounds is not None:
         config["max_risk_discuss_rounds"] = args.risk_rounds
+    # Applied before the explicit overrides below, so --provider and friends
+    # still take precedence over the preset.
+    if args.free:
+        for key, value in FREE_TIER_CONFIG.items():
+            if isinstance(value, dict) and isinstance(config.get(key), dict):
+                config[key].update(value)
+            else:
+                config[key] = value
+        if not os.getenv("GOOGLE_API_KEY"):
+            print("  --free selects Gemini's free tier but GOOGLE_API_KEY is not set.")
+            print("  Get a free key (no card) at https://aistudio.google.com/apikey,")
+            print("  or pass --provider ollama --deep-model <local model> to run offline.")
+            return 2
+        print("  --free: Gemini free tier, keyless data vendors, "
+              f"{config['market_indicator_budget']} indicators/ticker.")
+
     if args.provider is not None:
         config["llm_provider"] = args.provider
     if args.deep_model is not None:

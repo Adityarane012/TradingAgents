@@ -7,6 +7,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
     get_verified_market_snapshot,
 )
+from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.symbol_utils import is_india_ticker
 
 # India VIX (^INDIAVIX on Yahoo) is NSE's own domestic fear gauge, computed
@@ -41,8 +42,13 @@ def create_market_analyst(llm):
             get_verified_market_snapshot,
         ]
 
+        # Each indicator is its own tool-call round, and the agent re-sends
+        # its whole message history every round, so this budget is the main
+        # lever on tokens per run (8 indicators ~= 22k tokens, 4 ~= half).
+        # Lowered automatically by the free-tier preset.
+        indicator_budget = get_config().get("market_indicator_budget", 8)
         system_message = (
-            """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
+            f"""You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **{indicator_budget} indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 Moving Averages:
 - close_50_sma: 50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.

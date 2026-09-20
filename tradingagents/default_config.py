@@ -71,6 +71,54 @@ _ENV_OVERRIDES = {
 }
 
 
+# Zero-cost preset. Every entry below was chosen against a measured free-tier
+# limit rather than a marketing page (checked 2026-09-20):
+#
+#   Gemini free tier  - 1,000 req/day, 15 req/min, 250,000 tokens/min on
+#                       flash-lite. One ticker costs roughly 13 LLM calls, so
+#                       ~75 tickers/day fits. This is the only free tier that
+#                       comfortably clears the token budget of a full run.
+#   Groq free tier    - 30 req/min but only 6,000 tokens/min. A single market
+#                       analyst turn can exceed that on its own, which is why
+#                       an earlier Groq batch run died on rate limits.
+#   OpenRouter :free  - 20 req/min but 50 req/day at zero balance: about 3
+#                       tickers a day. Fine for a one-off, not for a universe.
+#   Ollama            - genuinely unlimited and offline, but quality and speed
+#                       depend on local hardware, and small local models are
+#                       unreliable at the structured output and tool calls this
+#                       pipeline depends on. Good for development, not a batch.
+#
+# Every data source here is already keyless: yfinance for prices and
+# statements, NSE/RBI/screener.in for the India context, Reddit RSS and
+# StockTwits for sentiment. Alpha Vantage is deliberately avoided (its free
+# tier is 25 requests/day) and FRED simply degrades to a sentinel when no key
+# is set, so the run continues without it.
+FREE_TIER_CONFIG = {
+    "llm_provider": "google",
+    "deep_think_llm": "gemini-3.1-flash-lite",
+    "quick_think_llm": "gemini-3.1-flash-lite",
+    "data_vendors": {
+        "core_stock_apis": "yfinance",
+        "technical_indicators": "yfinance",
+        "fundamental_data": "yfinance",
+        "news_data": "india_rss,yfinance",
+        "macro_data": "fred",
+        "prediction_markets": "polymarket",
+    },
+    # The dominant token cost is not any single payload (all tools together are
+    # ~6,100 tokens) but the tool-call loop: the agent re-sends its whole
+    # message history each round, so 8 indicators means ~10 rounds and a
+    # roughly quadratic climb to ~22,000 tokens. Halving the indicator budget
+    # is the single biggest saving available and costs little analytically,
+    # since the prompt already tells the model to avoid redundant indicators.
+    "market_indicator_budget": 4,
+    "max_debate_rounds": 1,
+    "max_risk_discuss_rounds": 1,
+    "india_data_enabled": True,
+    "screener_enabled": True,
+}
+
+
 _BOOL_TRUE = ("true", "1", "yes", "on")
 _BOOL_FALSE = ("false", "0", "no", "off")
 
@@ -158,6 +206,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
+    # How many technical indicators the market analyst may request. Each one is
+    # a separate tool-call round and the agent re-sends its whole message
+    # history every round, so this is the main lever on tokens per run: 8
+    # indicators cost roughly 22,000 tokens, 4 roughly half that. Lower it on a
+    # rate-limited free tier (see FREE_TIER_CONFIG).
+    "market_indicator_budget": 8,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.
