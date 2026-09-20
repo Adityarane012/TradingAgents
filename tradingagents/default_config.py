@@ -56,6 +56,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_REDDIT_ENABLED":       "reddit_enabled",
     "TRADINGAGENTS_INDIA_DATA_ENABLED":   "india_data_enabled",
     "TRADINGAGENTS_INDIA_MAX_STALENESS_DAYS": "india_max_staleness_days",
+    "TRADINGAGENTS_SCREENER_ENABLED":     "screener_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
@@ -183,6 +184,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # AFTER the analysis date is always refused regardless of this setting —
     # that would leak post-decision data into a historical run.
     "india_max_staleness_days": 5,
+    # screener.in as a second India source, for the one thing NSE's filings do
+    # not carry: the FII/DII split within public shareholding, plus headline
+    # ratios (P/E, ROCE, ROE, book value). Off by default — it is a
+    # third-party site with no API whose terms cover personal, non-commercial
+    # use, so it is a deliberate choice rather than something enabled for
+    # everyone. Requests are throttled and cached; NSE stays primary and the
+    # block flags any disagreement between the two on promoter holding.
+    "screener_enabled": False,
     # Search queries used by get_global_news for macro headlines. Extend or
     # replace to broaden geographic / sector coverage.
     "global_news_queries": [

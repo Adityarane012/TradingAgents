@@ -225,6 +225,22 @@ python scripts/verify_india_sources.py --date 2026-09-18 --tickers RELIANCE.NS,T
 
 It cross-checks Nifty and India VIX against Yahoo Finance and exits non-zero if anything disagrees. Turn the whole feature off with `india_data_enabled: false`, `TRADINGAGENTS_INDIA_DATA_ENABLED=false`, or `--no-india-data` on the batch runner — worth doing if NSE blocks your network, since each blocked fetch costs a timeout first. `.BO`-only tickers are skipped: a BSE ticker's root is not assumed to name the same company on NSE.
 
+RBI's current policy rates (repo, SDF, MSF, bank rate, CRR, SLR) are included too, scraped from `rbi.org.in`. FRED has no live India policy-rate series — its `india_discount_rate` alias was removed because the series behind it stopped updating in July 2022 and would have reported 5.15% against an actual repo rate of 5.25%. Because RBI's page states current values with no as-of date, these are refused on historical runs rather than risk asserting a rate that was not then in force.
+
+#### Optional: screener.in for the FII/DII split
+
+NSE's filings report promoter versus public as a single split, and never break the public half into foreign (FII) and domestic (DII) institutions — often the more interesting half. Reliance's FII holding fell from 21.30% to 17.19% over eight quarters while DII rose from 17.61% to 21.10%, a rotation neither the aggregate nor the price reveals. [screener.in](https://www.screener.in) publishes that split, along with P/E, ROCE, ROE and book value.
+
+It is **off by default**, being a third-party site with no API whose terms cover personal, non-commercial use:
+
+```python
+config = {"screener_enabled": True}     # or TRADINGAGENTS_SCREENER_ENABLED=true
+```
+
+When enabled, requests are throttled and cached, sent with an identified user agent, and NSE stays the primary source — if the two disagree on promoter holding, the prompt says so and tells the model to prefer the exchange filing. Like the RBI rates, it is live-only: screener labels shareholding by quarter end rather than filing date, so there is no way to know what was public on a past date.
+
+Promoter *pledging* remains unavailable from every free source tried, and the fundamentals prompt states that outright rather than inviting the model to guess.
+
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
 </p>

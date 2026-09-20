@@ -69,21 +69,27 @@ def _no_live_nse_calls(monkeypatch):
     fails with a clear message instead of silently hitting the network.
     """
     import tradingagents.dataflows.config as config_module
-    from tradingagents.dataflows import nse_india
+    from tradingagents.dataflows import nse_india, rbi_rates, screener_in
 
     config_module._config["india_data_enabled"] = False
+    config_module._config["screener_enabled"] = False
 
-    def _blocked(*args, **kwargs):
-        raise RuntimeError(
-            "A test tried to make a live NSE request. Stub the nse_india block "
-            "functions (see tests/test_india_context.py) or keep "
-            "india_data_enabled False for this test."
-        )
+    def _blocked(source: str):
+        def raiser(*args, **kwargs):
+            raise RuntimeError(
+                f"A test tried to make a live {source} request. Stub the module's "
+                f"block functions (see tests/test_india_context.py) or leave the "
+                f"India context disabled for this test."
+            )
 
-    monkeypatch.setattr(nse_india, "urlopen", _blocked)
-    nse_india.reset_state()
+        return raiser
+
+    for module, label in ((nse_india, "NSE"), (rbi_rates, "RBI"), (screener_in, "screener.in")):
+        monkeypatch.setattr(module, "urlopen", _blocked(label))
+        module.reset_state()
     yield
-    nse_india.reset_state()
+    for module in (nse_india, rbi_rates, screener_in):
+        module.reset_state()
 
 
 @pytest.fixture()

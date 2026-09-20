@@ -66,7 +66,7 @@ class TestFundamentalsAnalystIndiaPrompt:
         create_fundamentals_analyst(_capturing_tool_llm(captured))(_state("RELIANCE.NS"))
         text = _prompt_text(captured)
         assert "promoter shareholding" in text
-        assert "rather than estimating or inventing a figure" in text
+        assert "rather than estimating or inventing" in text
         assert "Nifty 50" in text
 
     def test_us_ticker_gets_no_india_caveat(self):

@@ -32,11 +32,13 @@ from .nse_india import (
     announcements_block,
     corporate_actions_block,
     fii_dii_block,
+    get_shareholding,
     market_levels_block,
     nifty_pcr_block,
     shareholding_block,
 )
 from .rbi_rates import policy_rates_block
+from .screener_in import ownership_split_block, screener_enabled
 from .symbol_utils import is_india_ticker
 
 # Announcement text is the only unbounded part of these blocks (a filing
@@ -105,6 +107,29 @@ def india_ownership_context(ticker: str, curr_date: str | date | None = None) ->
     """
     if not india_data_enabled(ticker):
         return ""
+    return (
+        _nse_ownership(ticker, curr_date)
+        # Opt-in, and empty unless screener_enabled. Appended after the NSE
+        # filings so the exchange's own numbers are read first; the block
+        # cross-checks its promoter figure against them.
+        + ownership_split_block(ticker, curr_date, _nse_promoter_pct(ticker, curr_date))
+    )
+
+
+def _nse_promoter_pct(ticker: str, curr_date: str | date | None) -> float | None:
+    """The latest NSE-filed promoter percentage, for cross-checking a second
+    source. Best-effort: ``None`` if unavailable, which just skips the check.
+    Cheap — nse_india caches the response this shares with the block above."""
+    if not screener_enabled():
+        return None
+    try:
+        rows = get_shareholding(ticker, curr_date, quarters=1)
+    except Exception:  # noqa: BLE001 — a cross-check must never break the prompt
+        return None
+    return rows[0].promoter_pct if rows else None
+
+
+def _nse_ownership(ticker: str, curr_date: str | date | None) -> str:
     return (
         "\n\n### Ownership and corporate actions from NSE filings\n"
         "Filed with the exchange and pasted in below; there is no tool to re-query "
