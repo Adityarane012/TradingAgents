@@ -14,8 +14,8 @@ shapes NSE actually returns. Tests never touch the network.
 | `nse_corp_actions_reliance.json` | `corporates-corporateActions?symbol=RELIANCE` (5 rows) |
 | `nse_announcements_reliance.json` | `corporate-announcements?symbol=RELIANCE&from_date&to_date` (6 rows) |
 
-If NSE changes a response shape, recapture the affected file and update the
-parser and tests together.
+If NSE changes a response shape, `scripts/verify_india_sources.py` (live) fails
+first; recapture the affected file and update the parser and tests together.
 
 `nse_shareholding_variants.json` holds real rows for two shapes the Reliance rows do not
 cover: Infosys (employee trusts are a third slice of the 100%, so promoter +
