@@ -28,6 +28,11 @@ Usage:
     # wall time in 429 backoffs. Skip it (News + StockTwits only) instead:
     python scripts/analyze_india_universe.py --no-reddit --resume
 
+    # NSE blocking your network? Skip the India context (FII/DII, VIX, PCR,
+    # shareholding, corporate actions, announcements) rather than paying a
+    # timeout per fetch:
+    python scripts/analyze_india_universe.py --no-india-data --resume
+
     # Your own list instead of the built-in universe:
     python scripts/analyze_india_universe.py --tickers RELIANCE.NS,TCS.NS,INFY.NS
     python scripts/analyze_india_universe.py --tickers-file my_tickers.txt
@@ -136,6 +141,11 @@ def main() -> int:
                          help="Skip Reddit entirely (News + StockTwits only for sentiment). "
                               "Avoids per-IP rate-limit backoffs on a multi-ticker run when "
                               "you don't have REDDIT_CLIENT_ID/SECRET configured.")
+    parser.add_argument("--no-india-data", action="store_true",
+                         help="Skip the NSE context (FII/DII flows, India VIX, Nifty PCR, "
+                              "promoter shareholding, corporate actions, announcements). "
+                              "Use if NSE is blocking your network — each blocked fetch "
+                              "costs a timeout before the circuit breaker opens.")
     parser.add_argument("--dry-run", action="store_true",
                          help="Print the plan and exit. No network or LLM calls.")
     parser.add_argument("--verify-only", action="store_true",
@@ -189,6 +199,8 @@ def main() -> int:
         config["quick_think_llm"] = args.quick_model
     if args.no_reddit:
         config["reddit_enabled"] = False
+    if args.no_india_data:
+        config["india_data_enabled"] = False
 
     # One graph instance, reused across tickers — propagate() reassigns
     # self.ticker per call by design, so this avoids rebuilding LLM clients

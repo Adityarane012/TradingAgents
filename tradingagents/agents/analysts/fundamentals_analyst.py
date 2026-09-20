@@ -8,22 +8,27 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
+from tradingagents.dataflows.india_context import india_ownership_context
 from tradingagents.dataflows.symbol_utils import is_india_ticker
 
-# yfinance's fundamentals/balance-sheet/cashflow tools have no field for
-# promoter shareholding, promoter pledging, or FII/DII ownership — all
-# material governance signals for Indian equities but simply absent from the
-# data this analyst can call. Telling the model to "always analyze" them
-# (as opposed to noting they're unavailable) would just invite it to
-# fabricate numbers under prompt pressure, the same failure mode the
-# sentiment analyst was redesigned to avoid (see sentiment_analyst.py).
+# Promoter shareholding used to be listed here as simply unavailable. It is
+# now fetched from NSE filings and injected below (india_context), so this
+# note no longer claims it is missing — telling the model data is absent when
+# the prompt contains it is its own kind of wrong. What remains genuinely
+# unavailable is promoter *pledging* (no free source found) and the FII/DII
+# split within public holding (NSE's shareholding-pattern endpoint reports
+# only promoter vs public). Those are still named as unavailable rather than
+# demanded, because a prompt that insists on a number the model cannot see
+# invites it to invent one.
 _INDIA_FUNDAMENTALS_NOTE = (
-    "\n\nThis is an Indian (NSE/BSE) equity. Two notes: (1) the available "
-    "tools have no field for promoter shareholding %, promoter share "
-    "pledging, or FII/DII ownership changes — material governance signals "
-    "for Indian companies that you cannot verify here. If they're relevant, "
-    "say plainly that this data was not available rather than estimating or "
-    "inventing a figure. (2) Benchmark valuation multiples (P/E, P/B, "
+    "\n\nThis is an Indian (NSE/BSE) equity. Three notes: (1) promoter "
+    "shareholding is provided below from NSE filings — use it, and do not "
+    "substitute any insider-holding percentage from the fundamentals tools, "
+    "which models Indian promoter holding inaccurately. (2) Promoter share "
+    "*pledging* and the FII/DII split within public holding are NOT available "
+    "from any source wired up here; if they matter to your conclusion, say "
+    "plainly that the data was not available rather than estimating or "
+    "inventing a figure. (3) Benchmark valuation multiples (P/E, P/B, "
     "EV/EBITDA) against Nifty 50 / domestic sector peers, not S&P 500 norms — "
     "Indian equities historically trade at different multiples than US peers."
 )
@@ -47,6 +52,10 @@ def create_fundamentals_analyst(llm):
             + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
             + " Use the available tools: `get_fundamentals` for comprehensive company analysis, `get_balance_sheet`, `get_cashflow`, and `get_income_statement` for specific financial statements."
             + (_INDIA_FUNDAMENTALS_NOTE if is_india_ticker(ticker) else "")
+            # Pre-fetched NSE filings (empty string for non-Indian tickers or
+            # when india_data_enabled=False). Appended after the note above so
+            # the model reads the caveats before the data they apply to.
+            + india_ownership_context(ticker, current_date)
             + get_language_instruction()
         )
 

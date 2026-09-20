@@ -56,6 +56,36 @@ def _isolate_config():
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_nse_calls(monkeypatch):
+    """Keep NSE off the wire in tests, and make a slip fail loudly.
+
+    The news and fundamentals analysts pre-fetch NSE context for .NS/.BO
+    tickers when they build their prompt, so any test that renders one of
+    those prompts would otherwise issue real HTTP requests — slow, flaky, and
+    rude to NSE. Two layers: the India context is off by default (a test that
+    wants it opts in with ``set_config``), and the underlying ``urlopen`` is
+    replaced by a raiser, so a future code path that bypasses the config flag
+    fails with a clear message instead of silently hitting the network.
+    """
+    import tradingagents.dataflows.config as config_module
+    from tradingagents.dataflows import nse_india
+
+    config_module._config["india_data_enabled"] = False
+
+    def _blocked(*args, **kwargs):
+        raise RuntimeError(
+            "A test tried to make a live NSE request. Stub the nse_india block "
+            "functions (see tests/test_india_context.py) or keep "
+            "india_data_enabled False for this test."
+        )
+
+    monkeypatch.setattr(nse_india, "urlopen", _blocked)
+    nse_india.reset_state()
+    yield
+    nse_india.reset_state()
+
+
 @pytest.fixture()
 def mock_llm_client():
     client = MagicMock()

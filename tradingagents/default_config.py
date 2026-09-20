@@ -54,6 +54,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_REDDIT_ENABLED":       "reddit_enabled",
+    "TRADINGAGENTS_INDIA_DATA_ENABLED":   "india_data_enabled",
+    "TRADINGAGENTS_INDIA_MAX_STALENESS_DAYS": "india_max_staleness_days",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
@@ -168,6 +170,19 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # limit entirely, or set this False to skip Reddit and fall back to
     # News + StockTwits only.
     "reddit_enabled": True,
+    # NSE India context (FII/DII flows, India VIX, Nifty PCR, promoter
+    # shareholding, corporate actions, exchange announcements) injected into
+    # the news and fundamentals analysts for .NS/.BO tickers. Ignored entirely
+    # for non-Indian tickers, so leaving it on costs a US run nothing. Set
+    # False (or pass --no-india-data) to skip the NSE calls — useful if NSE is
+    # blocking your network, since each blocked fetch still costs a timeout
+    # before the circuit breaker opens.
+    "india_data_enabled": True,
+    # How many days before the analysis date an NSE snapshot may be and still
+    # be served. 5 covers a weekend plus a market holiday. A snapshot dated
+    # AFTER the analysis date is always refused regardless of this setting —
+    # that would leak post-decision data into a historical run.
+    "india_max_staleness_days": 5,
     # Search queries used by get_global_news for macro headlines. Extend or
     # replace to broaden geographic / sector coverage.
     "global_news_queries": [

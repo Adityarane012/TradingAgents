@@ -8,6 +8,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_prediction_markets,
 )
+from tradingagents.dataflows.india_context import india_market_context
 from tradingagents.dataflows.symbol_utils import is_india_ticker
 
 # India-specific macro aliases resolve through FRED's MACRO_SERIES table
@@ -52,6 +53,11 @@ def create_news_analyst(llm):
             f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(ticker, start_date, end_date) for {asset_label}-specific news by ticker symbol, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + (_INDIA_NEWS_GUIDANCE if is_india_ticker(ticker) else "")
+            # Pre-fetched NSE market data + exchange filings (empty string for
+            # non-Indian tickers or when india_data_enabled=False). These are
+            # the domestic catalysts the guidance above tells the model to
+            # watch for but previously gave it no way to actually observe.
+            + india_market_context(ticker, current_date)
             + get_language_instruction()
         )
 
